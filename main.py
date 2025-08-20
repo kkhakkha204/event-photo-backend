@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 from database import engine, get_db
 import models
 from config import upload_image
+from face_service import extract_faces
 
 load_dotenv()
 
@@ -55,10 +56,25 @@ async def upload_image_endpoint(
         db.commit()
         db.refresh(db_image)
         
+        # Extract faces
+        faces = extract_faces(url)
+        
+        # Save embeddings
+        for face in faces:
+            embedding = models.FaceEmbedding(
+                image_id=db_image.id,
+                embedding=face['embedding'],
+                bbox=face['area']
+            )
+            db.add(embedding)
+        
+        db.commit()
+        
         return {
             "success": True,
             "image_id": db_image.id,
-            "url": url
+            "url": url,
+            "faces_detected": len(faces)
         }
     except Exception as e:
         return {"success": False, "error": str(e)}
