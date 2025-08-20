@@ -16,6 +16,7 @@ app = FastAPI(title="Event Photo Search API")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
+        "*",
         "http://localhost:3000",  # Local development
         "https://event-photo-frontend.vercel.app/"  # Thay bằng URL Vercel của bạn
     ],
