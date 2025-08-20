@@ -1,9 +1,11 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, File, UploadFile, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy.orm import Session
 import os
 from dotenv import load_dotenv
-from database import engine
+from database import engine, get_db
 import models
+from config import upload_image
 
 load_dotenv()
 
@@ -36,3 +38,27 @@ def health_check():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
+@app.post("/api/upload")
+async def upload_image_endpoint(
+    file: UploadFile = File(...), 
+    db: Session = Depends(get_db)
+):
+    try:
+        # Upload to Cloudinary
+        contents = await file.read()
+        url = upload_image(contents)
+        
+        # Save to database
+        db_image = models.Image(url=url)
+        db.add(db_image)
+        db.commit()
+        db.refresh(db_image)
+        
+        return {
+            "success": True,
+            "image_id": db_image.id,
+            "url": url
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
