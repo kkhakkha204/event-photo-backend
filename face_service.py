@@ -3,6 +3,7 @@ from deepface import DeepFace
 import tempfile
 import requests
 from typing import List, Dict
+import os
 
 def download_image(url: str) -> str:
     """Download image từ URL về temp file"""
@@ -18,10 +19,11 @@ def extract_faces(image_url: str) -> List[Dict]:
     
     try:
         # Detect faces và extract embeddings
+        # Dùng mtcnn thay vì opencv
         faces = DeepFace.represent(
             img_path=temp_path,
             model_name="Facenet512",
-            detector_backend="opencv",
+            detector_backend="mtcnn",
             enforce_detection=False
         )
         
@@ -31,5 +33,5 @@ def extract_faces(image_url: str) -> List[Dict]:
         return []
     finally:
         # Clean up temp file
-        import os
-        os.unlink(temp_path)
+        if os.path.exists(temp_path):
+            os.unlink(temp_path)
