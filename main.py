@@ -7,7 +7,7 @@ from database import engine, get_db
 import models
 from config import upload_image
 from face_api_service import face_service
-from typing import List
+from typing import List, Dict
 import numpy as np
 
 load_dotenv()
@@ -85,15 +85,15 @@ async def upload_image_endpoint(
 async def search_faces(
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
-    threshold: float = 0.45  # Giảm threshold xuống 0.4
+    mode: str = "balanced"  # strict, balanced, loose
 ):
     try:
-        # Upload ảnh query lên Cloudinary
+        # Upload ảnh query
         contents = await file.read()
         query_url = upload_image(contents)
         
-        # Extract face từ ảnh query
-        query_faces = face_service.extract_faces(query_url)
+        # Extract faces từ ảnh query
+        query_faces = face_service.extract_faces(query_url, return_all=False)
         
         if not query_faces:
             return {
@@ -101,57 +101,94 @@ async def search_faces(
                 "message": "Không tìm thấy khuôn mặt trong ảnh"
             }
         
-        # Lấy embedding của khuôn mặt đầu tiên
         query_embedding = query_faces[0]['embedding']
         
-        # Lấy tất cả embeddings từ database
+        # Lấy tất cả embeddings
         all_embeddings = db.query(models.FaceEmbedding).all()
         
-        # Tìm matches với distance score
-        matches = []
+        # Tính distances cho tất cả faces
+        all_distances = []
+        face_matches = []
+        
         for face_emb in all_embeddings:
             distance = face_service.compare_faces(
                 query_embedding, 
                 face_emb.embedding
             )
-            
-            if distance < threshold:
-                matches.append({
-                    'image_id': face_emb.image_id,
-                    'distance': distance,
-                    'bbox': face_emb.bbox,
-                    'confidence': 1 - (distance / threshold)  # Confidence score
-                })
-        
-        # Group by image và lấy thông tin ảnh
-        image_ids = list(set([m['image_id'] for m in matches]))
-        images = db.query(models.Image).filter(
-            models.Image.id.in_(image_ids)
-        ).all()
-        
-        # Format response với confidence score
-        results = []
-        for img in images:
-            img_matches = [m for m in matches if m['image_id'] == img.id]
-            # Tính average confidence cho image
-            avg_confidence = sum(m['confidence'] for m in img_matches) / len(img_matches)
-            results.append({
-                'image_id': img.id,
-                'url': img.url,
-                'matches': len(img_matches),
-                'confidence': avg_confidence,
-                'faces': img_matches
+            all_distances.append(distance)
+            face_matches.append({
+                'image_id': face_emb.image_id,
+                'distance': distance,
+                'bbox': face_emb.bbox,
+                'embedding_id': face_emb.id
             })
         
-        # Sort by confidence score thay vì số lượng matches
-        results.sort(key=lambda x: x['confidence'], reverse=True)
+        # Tính adaptive thresholds
+        strict_threshold, loose_threshold = face_service.calculate_adaptive_threshold(all_distances)
+        
+        # Chọn threshold theo mode
+        if mode == "strict":
+            threshold = strict_threshold
+        elif mode == "loose":
+            threshold = loose_threshold
+        else:  # balanced
+            threshold = (strict_threshold + loose_threshold) / 2
+        
+        # Filter matches
+        matches = [m for m in face_matches if m['distance'] < threshold]
+        
+        # Ranking algorithm
+        # 1. Group by image
+        image_scores = {}
+        for match in matches:
+            img_id = match['image_id']
+            if img_id not in image_scores:
+                image_scores[img_id] = {
+                    'distances': [],
+                    'count': 0
+                }
+            image_scores[img_id]['distances'].append(match['distance'])
+            image_scores[img_id]['count'] += 1
+        
+        # 2. Calculate composite score for each image
+        results = []
+        for img_id, scores in image_scores.items():
+            # Factors: min distance, average distance, face count
+            min_distance = min(scores['distances'])
+            avg_distance = np.mean(scores['distances'])
+            face_count = scores['count']
+            
+            # Composite score (lower is better)
+            composite_score = (min_distance * 0.5) + (avg_distance * 0.3) + (1 / (face_count + 1) * 0.2)
+            
+            # Get image info
+            image = db.query(models.Image).filter(models.Image.id == img_id).first()
+            if image:
+                results.append({
+                    'image_id': img_id,
+                    'url': image.url,
+                    'min_distance': min_distance,
+                    'avg_distance': avg_distance,
+                    'face_count': face_count,
+                    'composite_score': composite_score,
+                    'confidence': max(0, 1 - min_distance)
+                })
+        
+        # Sort by composite score
+        results.sort(key=lambda x: x['composite_score'])
         
         return {
             "success": True,
             "query_url": query_url,
             "results": results,
             "total_images": len(results),
-            "threshold_used": threshold
+            "thresholds": {
+                "strict": strict_threshold,
+                "balanced": threshold,
+                "loose": loose_threshold,
+                "used": threshold
+            },
+            "mode": mode
         }
         
     except Exception as e:
