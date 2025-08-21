@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 from database import engine, get_db
 import models
 from config import upload_image
-from face_service_simple import extract_faces_simple as extract_faces
+from face_api_service import face_service
 
 load_dotenv()
 
@@ -57,7 +57,7 @@ async def upload_image_endpoint(
         db.refresh(db_image)
         
         # Extract faces
-        faces = extract_faces(url)
+        faces = face_service.extract_faces(url)
         
         # Save embeddings
         for face in faces:
