@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 from database import engine, get_db
 import models
 from config import upload_image
-from face_service import extract_faces
+from face_service_simple import extract_faces_simple as extract_faces
 
 load_dotenv()
 
