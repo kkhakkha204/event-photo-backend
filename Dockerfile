@@ -11,8 +11,6 @@ RUN apt-get update && apt-get install -y \
     wget \
     libgthread-2.0-0 \
     ffmpeg \
-    libsm6 \
-    libxext6 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -24,5 +22,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy app code
 COPY . .
 
-# Run the application with shell
-CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+# Run using Python script
+CMD ["python", "start.py"]
