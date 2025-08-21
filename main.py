@@ -85,7 +85,7 @@ async def upload_image_endpoint(
 async def search_faces(
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
-    threshold: float = 0.6
+    threshold: float = 0.4
 ):
     try:
         # Upload ảnh query lên Cloudinary
