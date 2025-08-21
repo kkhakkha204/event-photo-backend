@@ -1,0 +1,5 @@
+[build]
+builder = "NIXPACKS"
+
+[build.nixpacks]
+aptPkgs = ["libgl1-mesa-glx", "libglib2.0-0", "libsm6", "libxext6", "libxrender1", "libgomp1"]
