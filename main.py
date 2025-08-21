@@ -85,7 +85,7 @@ async def upload_image_endpoint(
 async def search_faces(
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
-    threshold: float = 0.4
+    threshold: float = 0.4  # Giảm threshold xuống 0.4
 ):
     try:
         # Upload ảnh query lên Cloudinary
@@ -107,7 +107,7 @@ async def search_faces(
         # Lấy tất cả embeddings từ database
         all_embeddings = db.query(models.FaceEmbedding).all()
         
-        # Tìm matches
+        # Tìm matches với distance score
         matches = []
         for face_emb in all_embeddings:
             distance = face_service.compare_faces(
@@ -119,7 +119,8 @@ async def search_faces(
                 matches.append({
                     'image_id': face_emb.image_id,
                     'distance': distance,
-                    'bbox': face_emb.bbox
+                    'bbox': face_emb.bbox,
+                    'confidence': 1 - (distance / threshold)  # Confidence score
                 })
         
         # Group by image và lấy thông tin ảnh
@@ -128,25 +129,29 @@ async def search_faces(
             models.Image.id.in_(image_ids)
         ).all()
         
-        # Format response
+        # Format response với confidence score
         results = []
         for img in images:
             img_matches = [m for m in matches if m['image_id'] == img.id]
+            # Tính average confidence cho image
+            avg_confidence = sum(m['confidence'] for m in img_matches) / len(img_matches)
             results.append({
                 'image_id': img.id,
                 'url': img.url,
                 'matches': len(img_matches),
+                'confidence': avg_confidence,
                 'faces': img_matches
             })
         
-        # Sort by số lượng matches
-        results.sort(key=lambda x: x['matches'], reverse=True)
+        # Sort by confidence score thay vì số lượng matches
+        results.sort(key=lambda x: x['confidence'], reverse=True)
         
         return {
             "success": True,
             "query_url": query_url,
             "results": results,
-            "total_images": len(results)
+            "total_images": len(results),
+            "threshold_used": threshold
         }
         
     except Exception as e:
