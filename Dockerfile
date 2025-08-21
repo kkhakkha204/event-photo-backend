@@ -24,8 +24,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy app code
 COPY . .
 
-# Port from environment
-ENV PORT=8000
-
-# Run the application
-CMD uvicorn main:app --host 0.0.0.0 --port $PORT
+# Run the application with shell
+CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}"]
