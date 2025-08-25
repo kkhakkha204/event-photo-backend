@@ -9,7 +9,7 @@ class FaceAPIService:
         self.api_url = os.getenv("FACE_API_URL", "http://localhost:5000")
         print(f"Face API URL: {self.api_url}")
         self.last_request_time = 0
-        self.min_request_interval = 0.5  # Minimum 0.5s between requests
+        self.min_request_interval = 0.5
     
     def _rate_limit(self):
         """Simple rate limiting to avoid overwhelming the service"""
@@ -49,7 +49,7 @@ class FaceAPIService:
                         "image_url": image_url,
                         "return_all_faces": return_all
                     },
-                    timeout=45  # Increase timeout
+                    timeout=45
                 )
                 
                 print(f"Face API response status: {response.status_code}")
@@ -59,7 +59,6 @@ class FaceAPIService:
                     faces = data.get("faces", [])
                     print(f"Faces found: {len(faces)}")
                     
-                    # If no faces found and we haven't reached max retries, try again
                     if len(faces) == 0 and attempt < max_retries - 1:
                         print(f"No faces found, retrying in {retry_delay} seconds...")
                         time.sleep(retry_delay)
@@ -68,7 +67,6 @@ class FaceAPIService:
                     return faces
                     
                 elif response.status_code == 500 and attempt < max_retries - 1:
-                    # Server error, retry
                     print(f"Server error, retrying in {retry_delay} seconds...")
                     time.sleep(retry_delay)
                     continue
@@ -91,6 +89,63 @@ class FaceAPIService:
                     continue
                 return []
         
-        # If all retries failed
         print(f"All retries failed for {image_url}")
         return []
+    
+    def compare_faces(self, embedding1: List[float], embedding2: List[float]) -> float:
+        """So sánh 2 face embeddings với Euclidean distance"""
+        try:
+            if len(embedding1) != len(embedding2):
+                print(f"Warning: Embedding size mismatch: {len(embedding1)} vs {len(embedding2)}")
+                return 1.0
+            
+            diff = [a - b for a, b in zip(embedding1, embedding2)]
+            distance = sum(x * x for x in diff) ** 0.5
+            return distance
+        except Exception as e:
+            print(f"Error comparing faces: {e}")
+            return 1.0
+    
+    def calculate_adaptive_threshold(self, distances: List[float]) -> Tuple[float, float]:
+        """Tính threshold động dựa trên distribution của distances"""
+        if not distances:
+            return 0.4, 0.5
+        
+        valid_distances = [d for d in distances if d <= 1.0]
+        if not valid_distances:
+            return 0.4, 0.5
+        
+        mean_dist = np.mean(valid_distances)
+        std_dist = np.std(valid_distances)
+        min_dist = np.min(valid_distances)
+        percentile_25 = np.percentile(valid_distances, 25)
+        percentile_75 = np.percentile(valid_distances, 75)
+        
+        strict_threshold = min(0.35, min_dist + std_dist * 0.5)
+        loose_threshold = min(0.55, percentile_75)
+        
+        strict_threshold = max(0.25, strict_threshold)
+        loose_threshold = min(0.6, max(strict_threshold + 0.1, loose_threshold))
+        
+        print(f"Threshold calculation - Min: {min_dist:.3f}, Mean: {mean_dist:.3f}, "
+              f"Strict: {strict_threshold:.3f}, Loose: {loose_threshold:.3f}")
+        
+        return strict_threshold, loose_threshold
+    
+    def cleanup_face_api(self):
+        """Request cleanup on Face API service"""
+        try:
+            response = requests.post(
+                f"{self.api_url}/cleanup",
+                timeout=5
+            )
+            if response.status_code == 200:
+                result = response.json()
+                print(f"Face API cleanup: {result}")
+                return result
+        except Exception as e:
+            print(f"Error calling cleanup: {e}")
+        return None
+
+# Khởi tạo instance
+face_service = FaceAPIService()
