@@ -473,13 +473,12 @@ async def search_faces(
 @app.get("/api/images")
 async def get_all_images(
     skip: int = Query(0, ge=0),
-    limit: int = Query(20, ge=1, le=100),
+    limit: int = Query(20, ge=1, le=100),  
     event_id: Optional[int] = None,
     processed_only: bool = Query(True),
-    include_thumbnails: bool = Query(True),
     db: Session = Depends(get_db)
 ):
-    """Get images with CDN optimization"""
+    """Get images with proper pagination"""
     query = db.query(models.Image)
     
     if event_id:
@@ -494,23 +493,17 @@ async def get_all_images(
         desc(models.Image.uploaded_at)
     ).offset(skip).limit(limit).all()
     
-    # Build response with CDN URLs
-    image_data = []
-    for img in images:
-        data = {
-            "id": img.id,
-            "url": img.url,
-            "thumbnail": cdn_service.get_optimized_url(img.url, 'thumbnail') if include_thumbnails else None,
-            "preview": cdn_service.get_optimized_url(img.url, 'preview'),
-            "uploaded_at": img.uploaded_at.isoformat(),
-            "face_count": img.face_count,
-            "event_id": img.event_id,
-            "processed": img.processed
-        }
-        image_data.append(data)
-    
     return {
-        "images": image_data,
+        "images": [
+            {
+                "id": img.id,
+                "url": img.url,
+                "uploaded_at": img.uploaded_at.isoformat() if img.uploaded_at else None,
+                "face_count": getattr(img, 'face_count', 0),  # Safe access
+                "event_id": img.event_id,
+                "processed": getattr(img, 'processed', 2)  # Default to 2 if not exist
+            } for img in images
+        ],
         "total": total,
         "skip": skip,
         "limit": limit,
