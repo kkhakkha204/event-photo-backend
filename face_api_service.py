@@ -11,7 +11,6 @@ class FaceAPIService:
         self.api_url = os.getenv("FACE_API_URL", "http://localhost:5000")
         print(f"Face API URL: {self.api_url}")
         
-        # Setup session với retry strategy
         self.session = requests.Session()
         retry_strategy = Retry(
             total=3,
@@ -42,7 +41,6 @@ class FaceAPIService:
         try:
             print(f"Calling face API with image: {image_url} (attempt {retry_count + 1})")
             
-            # Check health trước khi gọi
             if retry_count == 0 and not self.health_check():
                 print("Face API service unhealthy, waiting...")
                 time.sleep(2)
@@ -53,7 +51,7 @@ class FaceAPIService:
                     "image_url": image_url,
                     "return_all_faces": return_all
                 },
-                timeout=60  # Tăng timeout cho ảnh lớn
+                timeout=60  
             )
             
             print(f"Face API response status: {response.status_code}")
@@ -63,7 +61,6 @@ class FaceAPIService:
                 faces = data.get("faces", [])
                 print(f"Faces found: {len(faces)}")
                 
-                # Nếu không tìm thấy face và còn retry
                 if len(faces) == 0 and retry_count < max_retries - 1:
                     print(f"No faces found, retrying in 2 seconds...")
                     time.sleep(2)
@@ -72,7 +69,7 @@ class FaceAPIService:
                 return faces
                 
             elif response.status_code in [502, 503, 504]:
-                # Service có thể đang restart
+               
                 if retry_count < max_retries - 1:
                     wait_time = 3 * (retry_count + 1)
                     print(f"Service unavailable, waiting {wait_time}s before retry...")
@@ -106,15 +103,15 @@ class FaceAPIService:
     def compare_faces(self, embedding1: List[float], embedding2: List[float]) -> float:
         """So sánh 2 face embeddings với Euclidean distance"""
         try:
-            # Validate embeddings
+           
             if not embedding1 or not embedding2:
-                return 1.0  # Max distance
+                return 1.0  
             
             if len(embedding1) != len(embedding2):
                 print(f"Embedding size mismatch: {len(embedding1)} vs {len(embedding2)}")
                 return 1.0
             
-            # Calculate Euclidean distance
+            
             diff = [a - b for a, b in zip(embedding1, embedding2)]
             distance = sum(x * x for x in diff) ** 0.5
             return distance
@@ -128,7 +125,6 @@ class FaceAPIService:
         if not distances:
             return 0.4, 0.5
         
-        # Filter out invalid distances
         valid_distances = [d for d in distances if 0 <= d <= 2]
         
         if not valid_distances:
@@ -138,7 +134,6 @@ class FaceAPIService:
         std_dist = np.std(valid_distances)
         min_dist = np.min(valid_distances)
         
-        # Calculate thresholds với bounds
         strict_threshold = min(0.35, max(0.2, mean_dist - std_dist))
         loose_threshold = min(0.6, max(0.4, mean_dist + std_dist * 0.5))
         
@@ -156,10 +151,8 @@ class FaceAPIService:
                 faces = self.extract_faces(url)
                 results[url] = faces
                 
-                # Small delay between requests
                 time.sleep(0.5)
             
-            # Longer delay between batches
             if i + batch_size < len(image_urls):
                 time.sleep(2)
         
