@@ -304,6 +304,8 @@ async def search_faces(
         query_embedding = np.array(query_faces[0]['embedding'])
         query_hash = calculate_query_hash(query_embedding.tolist(), mode)
         
+        query_norm = float(np.linalg.norm(query_embedding))
+        
         # Check Redis cache first
         if cache_service.is_available():
             cached_result = cache_service.get_search_result(query_hash)
