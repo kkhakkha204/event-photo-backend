@@ -740,6 +740,39 @@ async def get_download_url(
         "quality": quality
     }
 
+@app.delete("/api/image/{image_id}")
+async def delete_image(
+    image_id: int,
+    db: Session = Depends(get_db)
+):
+    try:
+        # Find image
+        image = db.query(models.Image).filter_by(id=image_id).first()
+        
+        if not image:
+            raise HTTPException(status_code=404, detail="Image not found")
+        
+        # Delete face embeddings first (cascade should handle this)
+        db.query(models.FaceEmbedding).filter_by(image_id=image_id).delete()
+        
+        # Delete embedding indexes
+        embedding_ids = db.query(models.FaceEmbedding.id).filter_by(image_id=image_id).all()
+        for emb_id in embedding_ids:
+            db.query(models.EmbeddingIndex).filter_by(face_embedding_id=emb_id[0]).delete()
+        
+        # Delete image record
+        db.delete(image)
+        db.commit()
+        
+        return {
+            "success": True,
+            "message": f"Image {image_id} deleted successfully"
+        }
+        
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
