@@ -284,7 +284,7 @@ async def search_faces(
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
     mode: str = Query("balanced", regex="^(strict|balanced|loose)$"),
-    limit: int = Query(20, ge=1, le=100),
+    limit: int = Query(50, ge=1, le=100),
     include_thumbnails: bool = Query(False)
 ):
     try:
@@ -326,7 +326,7 @@ async def search_faces(
                 }
         
         # Get embeddings based on mode
-        min_quality = 0.25 if mode == "loose" else 0.4 if mode == "balanced" else 0.6
+        min_quality = 0.15 if mode == "loose" else 0.2 if mode == "balanced" else 0.4
         
         # Query with optimizations
         query = db.query(
@@ -394,7 +394,7 @@ async def search_faces(
             distances = []
         
         strict_threshold, loose_threshold = face_service.calculate_adaptive_threshold(distances)
-        threshold = strict_threshold if mode == "strict" else loose_threshold if mode == "loose" else strict_threshold * 0.9
+        threshold = strict_threshold if mode == "strict" else loose_threshold if mode == "loose" else strict_threshold * 1.2
         
         # Vectorized search
         matches = await vectorized_search(query_embedding, embeddings_data, threshold)
