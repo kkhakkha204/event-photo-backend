@@ -325,7 +325,7 @@ async def search_faces(
                 }
         
         # Get embeddings based on mode
-        min_quality = 0.3 if mode == "loose" else 0.5 if mode == "balanced" else 0.7
+        min_quality = 0.25 if mode == "loose" else 0.4 if mode == "balanced" else 0.6
         
         # Query with optimizations
         query = db.query(
@@ -347,7 +347,7 @@ async def search_faces(
         
         # Limit scope for strict mode
         if mode == "strict":
-            query = query.order_by(desc(models.Image.uploaded_at)).limit(3000)
+            query = query.order_by(desc(models.Image.uploaded_at)).limit(5000)
         else:
             query = query.limit(10000)
         
@@ -370,7 +370,7 @@ async def search_faces(
         # Calculate thresholds
         sample_distances = np.random.choice(
             len(embeddings_data), 
-            min(100, len(embeddings_data)), 
+            min(200, len(embeddings_data)), 
             replace=False
         ).tolist() if embeddings_data else []
         
