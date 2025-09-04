@@ -284,7 +284,7 @@ async def search_faces(
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
     mode: str = Query("balanced", regex="^(strict|balanced|loose)$"),
-    limit: int = Query(50, ge=1, le=100),
+    limit: int = Query(100, ge=1, le=200),
     include_thumbnails: bool = Query(False)
 ):
     try:
