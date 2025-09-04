@@ -307,25 +307,25 @@ async def search_faces(
         query_norm = float(np.linalg.norm(query_embedding))
         
         # Check Redis cache first
-        if cache_service.is_available():
-            cached_result = cache_service.get_search_result(query_hash)
-            if cached_result:
-                # Add CDN optimized URLs
-                for result in cached_result[:limit]:
-                    result['optimized_urls'] = cdn_service.get_responsive_urls(result['url'])
-                    if include_thumbnails and result.get('bbox'):
-                        result['face_thumbnails'] = cdn_service.get_face_thumbnails(
-                            result['url'], [result['bbox']]
-                        )
+        # if cache_service.is_available():
+        #     cached_result = cache_service.get_search_result(query_hash)
+        #     if cached_result:
+        #         # Add CDN optimized URLs
+        #         for result in cached_result[:limit]:
+        #             result['optimized_urls'] = cdn_service.get_responsive_urls(result['url'])
+        #             if include_thumbnails and result.get('bbox'):
+        #                 result['face_thumbnails'] = cdn_service.get_face_thumbnails(
+        #                     result['url'], [result['bbox']]
+        #                 )
                 
-                return {
-                    "success": True,
-                    "query_url": query_url,
-                    "query_thumbnail": cdn_service.get_optimized_url(query_url, 'thumbnail'),
-                    "results": cached_result[:limit],
-                    "from_cache": True,
-                    "mode": mode
-                }
+        #         return {
+        #             "success": True,
+        #             "query_url": query_url,
+        #             "query_thumbnail": cdn_service.get_optimized_url(query_url, 'thumbnail'),
+        #             "results": cached_result[:limit],
+        #             "from_cache": True,
+        #             "mode": mode
+        #         }
         
         # Get embeddings based on mode
         min_quality = 0.15 if mode == "loose" else 0.2 if mode == "balanced" else 0.4
