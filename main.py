@@ -1,130 +1,334 @@
-# backend/optimized_main.py - API Optimization
-from fastapi import FastAPI, File, UploadFile, Depends, HTTPException, Query, BackgroundTasks, Request
+# backend/main.py - Final optimized version
+from fastapi import FastAPI, File, UploadFile, Depends, HTTPException, Query, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
-from fastapi_cache import FastAPICache
-from fastapi_cache.backends.redis import RedisBackend
-from fastapi_cache.decorator import cache
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
-from sqlalchemy import desc, and_, func, text
-import asyncio
-import aiofiles
-from typing import List, Dict, Optional, AsyncGenerator
-import time
-import hashlib
-import json
-from datetime import datetime, timedelta
-
+from sqlalchemy import desc, and_, func
+import os
+from dotenv import load_dotenv
 from database import engine, get_db
 import models
 from config import upload_image
-from face_api_service import face_service  
-from cache_service import cache_service
-from cdn_service import cdn_service
-from processing_pipeline import processing_pipeline
+from face_api_service import face_service
+from cache_service import cache_service  # Redis cache
+from cdn_service import cdn_service      # CDN optimization
+from typing import List, Dict, Optional
+import numpy as np
+import hashlib
+import json
+from datetime import datetime, timedelta
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 
-app = FastAPI(
-    title="Event Photo Search API - Optimized",
-    version="2.0.0",
-    docs_url="/docs",
-    redoc_url="/redoc"
-)
+load_dotenv()
 
-# Middleware stack
-app.add_middleware(GZipMiddleware, minimum_size=1000)
+models.Base.metadata.create_all(bind=engine)
+
+app = FastAPI(title="Event Photo Search API - Optimized")
+
+# Thread pool for CPU-intensive tasks
+executor = ThreadPoolExecutor(max_workers=4)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    max_age=3600  # Cache preflight for 1 hour
 )
 
-# Connection pooling and DB optimizations
-from sqlalchemy.pool import QueuePool
-engine.pool = QueuePool(
-    engine.pool._creator,
-    pool_size=10,
-    max_overflow=20,
-    pool_pre_ping=True,
-    pool_recycle=300
-)
+# Startup event
+@app.on_event("startup")
+async def startup_event():
+    """Warm up cache on startup"""
+    try:
+        db = next(get_db())
+        cache_service.warm_up_cache(db, limit=500)
+        db.close()
+    except:
+        pass
 
-# Response models for better serialization
-from pydantic import BaseModel
-from typing import Union
+# Helper functions
+def calculate_file_hash(content: bytes) -> str:
+    """Calculate SHA256 hash of file content"""
+    return hashlib.sha256(content).hexdigest()
 
-class ImageResponse(BaseModel):
-    id: int
-    url: str
-    uploaded_at: Optional[str]
-    face_count: int
-    event_id: Optional[int]
-    processed: int
-    optimized_urls: Optional[Dict[str, str]] = None
+def calculate_query_hash(embedding: List[float], mode: str) -> str:
+    """Create hash for cache key"""
+    data = json.dumps({'emb': embedding[:10], 'mode': mode})
+    return hashlib.md5(data.encode()).hexdigest()
 
-class SearchResponse(BaseModel):
-    success: bool
-    query_url: str
-    results: List[Dict]
-    total_matches: int
-    mode: str
-    from_cache: bool = False
-    processing_time: float
-
-# Request/Response optimization
-@app.middleware("http")
-async def add_process_time_header(request: Request, call_next):
-    start_time = time.time()
-    response = await call_next(request)
-    process_time = time.time() - start_time
-    response.headers["X-Process-Time"] = str(process_time)
-    return response
-
-# Optimized database queries with proper indexing
-class OptimizedQueries:
-    @staticmethod
-    def get_images_optimized(
-        db: Session, 
-        skip: int = 0, 
-        limit: int = 20,
-        event_id: Optional[int] = None,
-        processed_only: bool = True
-    ):
-        """Optimized image query with proper indexing"""
-        query = db.query(
-            models.Image.id,
-            models.Image.url,
-            models.Image.uploaded_at,
-            models.Image.face_count,
-            models.Image.event_id,
-            models.Image.processed
-        )
-        
-        # Use indexes efficiently
-        if processed_only:
-            query = query.filter(models.Image.processed == 2)
-        if event_id:
-            query = query.filter(models.Image.event_id == event_id)
-        
-        # Use index on uploaded_at for ordering
-        total = query.count()
-        images = query.order_by(
-            desc(models.Image.uploaded_at)
-        ).offset(skip).limit(limit).all()
-        
-        return images, total
+async def vectorized_search(query_embedding: np.ndarray, 
+                           embeddings_data: List[Dict],
+                           threshold: float) -> List[Dict]:
+    """Optimized vectorized search with Redis cache"""
     
-    @staticmethod 
-    def get_embeddings_for_search(
-        db: Session,
-        min_quality: float = 0.4,
-        limit: int = 10000
-    ):
-        """Optimized embedding query for search"""
-        return db.query(
+    # Check Redis cache for embeddings
+    if cache_service.is_available():
+        embedding_ids = [e['id'] for e in embeddings_data]
+        cached_embeddings = cache_service.batch_get_embeddings(embedding_ids)
+        
+        # Use cached embeddings where available
+        for i, data in enumerate(embeddings_data):
+            if data['id'] in cached_embeddings:
+                data['embedding'] = cached_embeddings[data['id']]
+    
+    # Vectorized distance calculation
+    embeddings_matrix = np.array([e['embedding'] for e in embeddings_data])
+    distances = np.linalg.norm(embeddings_matrix - query_embedding, axis=1)
+    
+    # Filter by threshold
+    matches = []
+    for i, distance in enumerate(distances):
+        if distance < threshold:
+            matches.append({
+                **embeddings_data[i],
+                'distance': float(distance)
+            })
+    
+    return matches
+
+@app.get("/")
+async def read_root():
+    cache_stats = cache_service.get_cache_stats() if cache_service.is_available() else {}
+    
+    return {
+        "message": "Event Photo Search API - Optimized",
+        "features": {
+            "redis_cache": cache_service.is_available(),
+            "cdn_optimization": True,
+            "background_processing": True,
+            "vectorized_search": True
+        },
+        "cache_stats": cache_stats
+    }
+
+@app.get("/health")
+async def health_check(db: Session = Depends(get_db)):
+    try:
+        db.execute("SELECT 1")
+        db_status = "connected"
+    except:
+        db_status = "disconnected"
+    
+    return {
+        "status": "healthy",
+        "database": db_status,
+        "redis": cache_service.is_available(),
+        "face_api": face_service.health_check()
+    }
+
+@app.post("/api/upload")
+async def upload_image_endpoint(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    event_id: Optional[int] = None,
+    process_immediately: bool = Query(False),
+    db: Session = Depends(get_db)
+):
+    try:
+        contents = await file.read()
+        
+        # Check for duplicates
+        file_hash = calculate_file_hash(contents)
+        existing = db.query(models.Image).filter_by(file_hash=file_hash).first()
+        
+        if existing:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "success": False,
+                    "message": "Image already exists",
+                    "image_id": existing.id,
+                    "url": existing.url,
+                    "optimized_urls": cdn_service.get_responsive_urls(existing.url)
+                }
+            )
+        
+        # Upload to Cloudinary
+        url = upload_image(contents)
+        
+        # Save image record
+        db_image = models.Image(
+            url=url,
+            event_id=event_id,
+            file_hash=file_hash,
+            processed=1 if process_immediately else 0
+        )
+        db.add(db_image)
+        db.commit()
+        db.refresh(db_image)
+        
+        # Process faces
+        if process_immediately:
+            # Process immediately and wait
+            faces = await process_faces_immediate(db_image.id, url, db)
+            
+            return {
+                "success": True,
+                "image_id": db_image.id,
+                "url": url,
+                "optimized_urls": cdn_service.get_responsive_urls(url),
+                "faces_detected": len(faces),
+                "processing": "completed"
+            }
+        else:
+            # Process in background
+            background_tasks.add_task(
+                process_faces_background,
+                db_image.id,
+                url
+            )
+            
+            return {
+                "success": True,
+                "image_id": db_image.id,
+                "url": url,
+                "optimized_urls": cdn_service.get_responsive_urls(url),
+                "processing": "background"
+            }
+        
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+async def process_faces_immediate(image_id: int, url: str, db: Session) -> List[Dict]:
+    """Process faces immediately and return results"""
+    try:
+        faces = face_service.extract_faces(url)
+        
+        # Cache embeddings in Redis
+        embeddings_to_cache = {}
+        
+        for face in faces:
+            emb_hash = hashlib.md5(
+                json.dumps(face['embedding'][:10]).encode()
+            ).hexdigest()
+            
+            embedding = models.FaceEmbedding(
+                image_id=image_id,
+                embedding=face['embedding'],
+                bbox=face.get('area'),
+                embedding_hash=emb_hash,
+                quality_score=face.get('confidence', 0.5)
+            )
+            db.add(embedding)
+            db.flush()  # Get ID
+            
+            # Prepare for Redis cache
+            embeddings_to_cache[embedding.id] = face['embedding']
+        
+        # Batch cache to Redis
+        if cache_service.is_available():
+            cache_service.batch_cache_embeddings(embeddings_to_cache)
+        
+        # Update image
+        image = db.query(models.Image).filter_by(id=image_id).first()
+        if image:
+            image.processed = 2
+            image.face_count = len(faces)
+        
+        db.commit()
+        return faces
+        
+    except Exception as e:
+        db.rollback()
+        raise e
+
+def process_faces_background(image_id: int, url: str):
+    """Background task to process faces"""
+    db = next(get_db())
+    try:
+        faces = face_service.extract_faces(url)
+        embeddings_to_cache = {}
+        
+        for face in faces:
+            emb_hash = hashlib.md5(
+                json.dumps(face['embedding'][:10]).encode()
+            ).hexdigest()
+            
+            embedding = models.FaceEmbedding(
+                image_id=image_id,
+                embedding=face['embedding'],
+                bbox=face.get('area'),
+                embedding_hash=emb_hash,
+                quality_score=face.get('confidence', 0.5)
+            )
+            db.add(embedding)
+            db.flush()
+            
+            embeddings_to_cache[embedding.id] = face['embedding']
+        
+        # Cache to Redis
+        if cache_service.is_available():
+            cache_service.batch_cache_embeddings(embeddings_to_cache)
+        
+        # Update image
+        image = db.query(models.Image).filter_by(id=image_id).first()
+        if image:
+            image.processed = 2
+            image.face_count = len(faces)
+        
+        db.commit()
+        print(f"✓ Processed {len(faces)} faces for image {image_id}")
+        
+    except Exception as e:
+        print(f"✗ Error processing image {image_id}: {e}")
+        db.rollback()
+    finally:
+        db.close()
+
+@app.post("/api/search")
+async def search_faces(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    mode: str = Query("balanced", regex="^(strict|balanced|loose)$"),
+    limit: int = Query(20, ge=1, le=100),
+    include_thumbnails: bool = Query(False)
+):
+    try:
+        contents = await file.read()
+        query_url = upload_image(contents)
+        
+        # Extract face
+        query_faces = face_service.extract_faces(query_url, return_all=False)
+        
+        if not query_faces:
+            return {
+                "success": False,
+                "message": "No face found in query image",
+                "query_url": query_url
+            }
+        
+        query_embedding = np.array(query_faces[0]['embedding'])
+        query_hash = calculate_query_hash(query_embedding.tolist(), mode)
+        
+        # Check Redis cache first
+        if cache_service.is_available():
+            cached_result = cache_service.get_search_result(query_hash)
+            if cached_result:
+                # Add CDN optimized URLs
+                for result in cached_result[:limit]:
+                    result['optimized_urls'] = cdn_service.get_responsive_urls(result['url'])
+                    if include_thumbnails and result.get('bbox'):
+                        result['face_thumbnails'] = cdn_service.get_face_thumbnails(
+                            result['url'], [result['bbox']]
+                        )
+                
+                return {
+                    "success": True,
+                    "query_url": query_url,
+                    "query_thumbnail": cdn_service.get_optimized_url(query_url, 'thumbnail'),
+                    "results": cached_result[:limit],
+                    "from_cache": True,
+                    "mode": mode
+                }
+        
+        # Get embeddings based on mode
+        min_quality = 0.25 if mode == "loose" else 0.4 if mode == "balanced" else 0.6
+        
+        # Query with optimizations
+        query = db.query(
             models.FaceEmbedding.id,
             models.FaceEmbedding.image_id,
             models.FaceEmbedding.embedding,
@@ -132,78 +336,173 @@ class OptimizedQueries:
             models.FaceEmbedding.quality_score,
             models.Image.url,
             models.Image.uploaded_at
-        ).select_from(
-            models.FaceEmbedding
         ).join(
-            models.Image,
-            models.FaceEmbedding.image_id == models.Image.id
+            models.Image
         ).filter(
             and_(
                 models.FaceEmbedding.quality_score >= min_quality,
                 models.Image.processed == 2
             )
-        ).order_by(
-            desc(models.Image.uploaded_at)
-        ).limit(limit).all()
-
-# Streaming responses for large datasets
-async def stream_images(images: List, include_cdn: bool = False) -> AsyncGenerator[str, None]:
-    """Stream images as NDJSON for better memory usage"""
-    yield '{"images": ['
-    
-    for i, img in enumerate(images):
-        if i > 0:
-            yield ","
+        )
         
-        image_data = {
-            "id": img.id,
-            "url": img.url,
-            "uploaded_at": img.uploaded_at.isoformat() if img.uploaded_at else None,
-            "face_count": getattr(img, 'face_count', 0),
-            "event_id": img.event_id,
-            "processed": getattr(img, 'processed', 2)
+        # Limit scope for strict mode
+        if mode == "strict":
+            query = query.order_by(desc(models.Image.uploaded_at)).limit(5000)
+        else:
+            query = query.limit(10000)
+        
+        results = query.all()
+        
+        # Prepare embeddings data
+        embeddings_data = [
+            {
+                'id': r.id,
+                'image_id': r.image_id,
+                'embedding': r.embedding,
+                'bbox': r.bbox,
+                'quality': r.quality_score,
+                'url': r.url,
+                'uploaded_at': r.uploaded_at
+            }
+            for r in results
+        ]
+        
+        # Calculate thresholds
+        sample_distances = np.random.choice(
+            len(embeddings_data), 
+            min(200, len(embeddings_data)), 
+            replace=False
+        ).tolist() if embeddings_data else []
+        
+        if sample_distances:
+            sample_embeddings = [embeddings_data[i]['embedding'] for i in sample_distances]
+            distances = np.linalg.norm(
+                np.array(sample_embeddings) - query_embedding, 
+                axis=1
+            ).tolist()
+        else:
+            distances = []
+        
+        strict_threshold, loose_threshold = face_service.calculate_adaptive_threshold(distances)
+        threshold = strict_threshold if mode == "strict" else loose_threshold if mode == "loose" else strict_threshold * 0.9
+        
+        # Vectorized search
+        matches = await vectorized_search(query_embedding, embeddings_data, threshold)
+        
+        # Group by image
+        image_scores = {}
+        for match in matches:
+            img_id = match['image_id']
+            if img_id not in image_scores:
+                image_scores[img_id] = {
+                    'url': match['url'],
+                    'distances': [],
+                    'bboxes': [],
+                    'best_quality': 0,
+                    'uploaded_at': match['uploaded_at']
+                }
+            image_scores[img_id]['distances'].append(match['distance'])
+            image_scores[img_id]['bboxes'].append(match['bbox'])
+            image_scores[img_id]['best_quality'] = max(
+                image_scores[img_id]['best_quality'], 
+                match['quality']
+            )
+        
+        # Build final results
+        final_results = []
+        for img_id, data in image_scores.items():
+            min_distance = min(data['distances'])
+            avg_distance = np.mean(data['distances'])
+            
+            # Composite score
+            composite_score = (
+                min_distance * 0.4 + 
+                avg_distance * 0.3 + 
+                (1 / (len(data['distances']) + 1)) * 0.2 +
+                (1 - data['best_quality']) * 0.1
+            )
+            
+            result = {
+                'image_id': img_id,
+                'url': data['url'],
+                'optimized_urls': cdn_service.get_responsive_urls(data['url']),
+                'min_distance': float(min_distance),
+                'avg_distance': float(avg_distance),
+                'face_count': len(data['distances']),
+                'composite_score': float(composite_score),
+                'confidence': max(0, 1 - min_distance),
+                'uploaded_at': data['uploaded_at'].isoformat()
+            }
+            
+            # Add face thumbnails if requested
+            if include_thumbnails and data['bboxes']:
+                result['face_thumbnails'] = cdn_service.get_face_thumbnails(
+                    data['url'], 
+                    data['bboxes'][:3]  # Max 3 face thumbnails
+                )
+            
+            final_results.append(result)
+        
+        # Sort and limit
+        final_results.sort(key=lambda x: x['composite_score'])
+        final_results = final_results[:limit]
+        
+        # Cache results in Redis
+        if cache_service.is_available() and final_results:
+            cache_service.cache_search_result(query_hash, final_results, ttl_minutes=30)
+        
+        return {
+            "success": True,
+            "query_url": query_url,
+            "query_thumbnail": cdn_service.get_optimized_url(query_url, 'thumbnail'),
+            "results": final_results,
+            "total_matches": len(final_results),
+            "thresholds": {
+                "strict": strict_threshold,
+                "balanced": (strict_threshold + loose_threshold) / 2,
+                "loose": loose_threshold,
+                "used": threshold
+            },
+            "mode": mode,
+            "from_cache": False
         }
         
-        if include_cdn:
-            image_data["optimized_urls"] = cdn_service.get_responsive_urls(img.url)
-        
-        yield json.dumps(image_data)
-        
-        # Yield control for other tasks
-        if i % 10 == 0:
-            await asyncio.sleep(0)
-    
-    yield ']}'
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-# Cached endpoints
-@app.get("/api/images/cached")
-@cache(expire=300)  # 5 minutes cache
-async def get_cached_images(
+@app.get("/api/images")
+async def get_all_images(
     skip: int = Query(0, ge=0),
-    limit: int = Query(20, ge=1, le=50),
+    limit: int = Query(20, ge=1, le=100),  
     event_id: Optional[int] = None,
+    processed_only: bool = Query(True),
     db: Session = Depends(get_db)
 ):
-    """Cached image list with CDN URLs"""
-    images, total = OptimizedQueries.get_images_optimized(
-        db, skip, limit, event_id, processed_only=True
-    )
+    """Get images with proper pagination"""
+    query = db.query(models.Image)
     
-    # Batch optimize URLs
-    urls = [img.url for img in images]
-    thumbnails = cdn_service.batch_optimize_urls(urls, 'thumbnail')
+    if event_id:
+        query = query.filter(models.Image.event_id == event_id)
+    
+    if processed_only:
+        query = query.filter(models.Image.processed == 2)
+    
+    total = query.count()
+    
+    images = query.order_by(
+        desc(models.Image.uploaded_at)
+    ).offset(skip).limit(limit).all()
     
     return {
         "images": [
             {
                 "id": img.id,
                 "url": img.url,
-                "thumbnail": thumbnails[i],
                 "uploaded_at": img.uploaded_at.isoformat() if img.uploaded_at else None,
-                "face_count": getattr(img, 'face_count', 0),
-                "event_id": img.event_id
-            }
-            for i, img in enumerate(images)
+                "face_count": getattr(img, 'face_count', 0),  # Safe access
+                "event_id": img.event_id,
+                "processed": getattr(img, 'processed', 2)  # Default to 2 if not exist
+            } for img in images
         ],
         "total": total,
         "skip": skip,
@@ -211,220 +510,94 @@ async def get_cached_images(
         "has_more": skip + limit < total
     }
 
-@app.get("/api/images/stream")
-async def stream_images_endpoint(
-    skip: int = Query(0, ge=0),
-    limit: int = Query(100, ge=1, le=500),
-    include_cdn: bool = Query(False),
+@app.get("/api/image/{image_id}")
+async def get_image_details(
+    image_id: int,
+    include_similar: bool = Query(False),
     db: Session = Depends(get_db)
 ):
-    """Stream large image datasets"""
-    images, _ = OptimizedQueries.get_images_optimized(db, skip, limit)
+    """Get detailed image information with faces"""
+    image = db.query(models.Image).filter_by(id=image_id).first()
     
-    return StreamingResponse(
-        stream_images(images, include_cdn),
-        media_type="application/json",
-        headers={
-            "Cache-Control": "public, max-age=300",
-            "X-Total-Count": str(len(images))
-        }
-    )
-
-# Optimized search endpoint
-@app.post("/api/search/optimized")
-async def optimized_search(
-    file: UploadFile = File(...),
-    db: Session = Depends(get_db),
-    mode: str = Query("balanced", regex="^(strict|balanced|loose)$"),
-    limit: int = Query(20, ge=1, le=100),
-    quality_threshold: Optional[float] = Query(None, ge=0.1, le=1.0)
-):
-    """Optimized search with better caching and vectorization"""
-    start_time = time.time()
+    if not image:
+        raise HTTPException(status_code=404, detail="Image not found")
     
-    try:
-        # Read file efficiently
-        contents = await file.read()
-        if len(contents) > 10 * 1024 * 1024:  # 10MB limit
-            raise HTTPException(status_code=413, detail="File too large")
-        
-        # Generate cache key
-        file_hash = hashlib.md5(contents).hexdigest()
-        cache_key = f"search:{file_hash}:{mode}:{limit}"
-        
-        # Check cache first
-        if cache_service.is_available():
-            cached_result = cache_service.get_search_result(cache_key)
-            if cached_result:
-                return SearchResponse(
-                    success=True,
-                    query_url="cached",
-                    results=cached_result[:limit],
-                    total_matches=len(cached_result),
-                    mode=mode,
-                    from_cache=True,
-                    processing_time=time.time() - start_time
-                )
-        
-        # Upload and extract faces
-        query_url = upload_image(contents)
-        query_faces = face_service.extract_faces(query_url, return_all=False)
-        
-        if not query_faces:
-            return JSONResponse(
-                status_code=422,
-                content={
-                    "success": False,
-                    "message": "No face detected in query image",
-                    "query_url": query_url
+    # Get faces
+    faces = db.query(models.FaceEmbedding).filter_by(image_id=image_id).all()
+    
+    # Build response
+    response = {
+        "id": image.id,
+        "url": image.url,
+        "optimized_urls": cdn_service.get_responsive_urls(image.url),
+        "placeholder": cdn_service.generate_placeholder(image.url),
+        "uploaded_at": image.uploaded_at.isoformat(),
+        "face_count": image.face_count,
+        "event_id": image.event_id,
+        "faces": [
+            {
+                "id": face.id,
+                "bbox": face.bbox,
+                "quality": face.quality_score,
+                "thumbnail": cdn_service.get_face_thumbnails(
+                    image.url, 
+                    [face.bbox]
+                )[0] if face.bbox else None
+            }
+            for face in faces
+        ]
+    }
+    
+    # Get similar images if requested
+    if include_similar and cache_service.is_available():
+        similar = cache_service.get_similar_images(image_id, limit=10)
+        if similar:
+            similar_images = db.query(models.Image).filter(
+                models.Image.id.in_([s[0] for s in similar])
+            ).all()
+            
+            response["similar_images"] = [
+                {
+                    "id": img.id,
+                    "url": img.url,
+                    "thumbnail": cdn_service.get_optimized_url(img.url, 'thumbnail'),
+                    "similarity": next(s[1] for s in similar if s[0] == img.id)
                 }
-            )
-        
-        import numpy as np
-        query_embedding = np.array(query_faces[0]['embedding'], dtype=np.float32)
-        
-        # Dynamic quality threshold
-        if quality_threshold is None:
-            quality_threshold = 0.6 if mode == "strict" else 0.4 if mode == "balanced" else 0.3
-        
-        # Optimized database query
-        embeddings_data = OptimizedQueries.get_embeddings_for_search(
-            db, quality_threshold, 15000 if mode == "loose" else 10000
-        )
-        
-        if not embeddings_data:
-            return SearchResponse(
-                success=True,
-                query_url=query_url,
-                results=[],
-                total_matches=0,
-                mode=mode,
-                from_cache=False,
-                processing_time=time.time() - start_time
-            )
-        
-        # Vectorized search with optimized numpy operations
-        embeddings_matrix = np.array([
-            emb.embedding for emb in embeddings_data
-        ], dtype=np.float32)
-        
-        # Compute distances using optimized numpy
-        distances = np.linalg.norm(
-            embeddings_matrix - query_embedding, 
-            axis=1, 
-            ord=2
-        )
-        
-        # Dynamic threshold calculation
-        threshold_percentiles = {
-            "strict": 15,
-            "balanced": 25, 
-            "loose": 35
-        }
-        threshold = np.percentile(distances, threshold_percentiles[mode])
-        threshold = max(0.3, min(0.8, threshold))  # Bounds
-        
-        # Filter matches
-        mask = distances < threshold
-        valid_indices = np.where(mask)[0]
-        
-        # Build results efficiently
-        image_matches = {}
-        for idx in valid_indices:
-            emb_data = embeddings_data[idx]
-            distance = float(distances[idx])
-            
-            img_id = emb_data.image_id
-            if img_id not in image_matches:
-                image_matches[img_id] = {
-                    'url': emb_data.url,
-                    'distances': [],
-                    'bboxes': [],
-                    'uploaded_at': emb_data.uploaded_at
-                }
-            
-            image_matches[img_id]['distances'].append(distance)
-            if emb_data.bbox:
-                image_matches[img_id]['bboxes'].append(emb_data.bbox)
-        
-        # Rank and format results
-        final_results = []
-        for img_id, data in image_matches.items():
-            min_dist = min(data['distances'])
-            avg_dist = sum(data['distances']) / len(data['distances'])
-            
-            final_results.append({
-                'image_id': img_id,
-                'url': data['url'],
-                'thumbnail': cdn_service.get_optimized_url(data['url'], 'thumbnail'),
-                'min_distance': min_dist,
-                'avg_distance': avg_dist,
-                'face_count': len(data['distances']),
-                'confidence': max(0, 1 - min_dist),
-                'uploaded_at': data['uploaded_at'].isoformat()
-            })
-        
-        # Sort by composite score
-        final_results.sort(key=lambda x: x['min_distance'])
-        final_results = final_results[:limit]
-        
-        # Cache results
-        if cache_service.is_available() and final_results:
-            cache_service.cache_search_result(cache_key, final_results, ttl_minutes=60)
-        
-        processing_time = time.time() - start_time
-        
-        return SearchResponse(
-            success=True,
-            query_url=query_url,
-            results=final_results,
-            total_matches=len(final_results),
-            mode=mode,
-            from_cache=False,
-            processing_time=processing_time
-        )
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+                for img in similar_images
+            ]
+    
+    return response
 
-# Batch upload with progress tracking
-@app.post("/api/upload/batch-optimized")
-async def optimized_batch_upload(
+@app.post("/api/batch-upload")
+async def batch_upload(
     background_tasks: BackgroundTasks,
     files: List[UploadFile] = File(...),
     event_id: Optional[int] = None,
-    process_immediately: bool = Query(False),
     db: Session = Depends(get_db)
 ):
-    """Optimized batch upload with progress tracking"""
-    if len(files) > 50:
-        raise HTTPException(status_code=413, detail="Too many files (max 50)")
-    
-    batch_id = hashlib.md5(f"{time.time()}{len(files)}".encode()).hexdigest()[:8]
+    """Batch upload multiple images"""
     results = []
-    upload_tasks = []
     
-    # Process files concurrently
-    async def process_single_file(file: UploadFile, index: int):
+    for file in files[:50]:  # Max 50 files
         try:
             contents = await file.read()
-            file_hash = hashlib.sha256(contents).hexdigest()
+            file_hash = calculate_file_hash(contents)
             
             # Check duplicate
             existing = db.query(models.Image).filter_by(file_hash=file_hash).first()
             if existing:
-                return {
-                    "index": index,
+                results.append({
                     "filename": file.filename,
                     "status": "duplicate",
                     "image_id": existing.id,
                     "url": existing.url
-                }
+                })
+                continue
             
-            # Upload to CDN
+            # Upload
             url = upload_image(contents)
             
-            # Save to database
+            # Save
             db_image = models.Image(
                 url=url,
                 event_id=event_id,
@@ -434,159 +607,127 @@ async def optimized_batch_upload(
             db.add(db_image)
             db.flush()
             
-            return {
-                "index": index,
+            # Queue for processing
+            background_tasks.add_task(
+                process_faces_background,
+                db_image.id,
+                url
+            )
+            
+            results.append({
                 "filename": file.filename,
                 "status": "uploaded",
                 "image_id": db_image.id,
                 "url": url,
                 "thumbnail": cdn_service.get_optimized_url(url, 'thumbnail')
-            }
+            })
             
         except Exception as e:
-            return {
-                "index": index,
+            results.append({
                 "filename": file.filename,
                 "status": "error",
                 "error": str(e)
-            }
-    
-    # Process files concurrently
-    tasks = [process_single_file(file, i) for i, file in enumerate(files)]
-    results = await asyncio.gather(*tasks)
+            })
     
     db.commit()
     
-    # Queue processing
-    uploaded_images = [r for r in results if r["status"] == "uploaded"]
-    if uploaded_images:
-        if process_immediately:
-            # Process first 10 immediately, rest in background
-            immediate_batch = uploaded_images[:10]
-            background_batch = uploaded_images[10:]
-            
-            for img in immediate_batch:
-                background_tasks.add_task(
-                    processing_pipeline.process_single_image,
-                    img["image_id"],
-                    img["url"]
-                )
-            
-            if background_batch:
-                background_tasks.add_task(
-                    processing_pipeline.process_batch,
-                    [(img["image_id"], img["url"]) for img in background_batch]
-                )
-        else:
-            # All in background
-            background_tasks.add_task(
-                processing_pipeline.process_batch,
-                [(img["image_id"], img["url"]) for img in uploaded_images]
-            )
-    
-    # Summary statistics
-    stats = {
-        "uploaded": len([r for r in results if r["status"] == "uploaded"]),
-        "duplicates": len([r for r in results if r["status"] == "duplicate"]),
-        "errors": len([r for r in results if r["status"] == "error"])
+    return {
+        "success": True,
+        "total": len(files),
+        "uploaded": sum(1 for r in results if r["status"] == "uploaded"),
+        "duplicates": sum(1 for r in results if r["status"] == "duplicate"),
+        "errors": sum(1 for r in results if r["status"] == "error"),
+        "results": results
     }
+
+@app.delete("/api/cache/clear")
+async def clear_cache(
+    pattern: Optional[str] = Query(None),
+    db: Session = Depends(get_db)
+):
+    """Clear cache"""
+    cleared = 0
+    
+    # Clear Redis cache
+    if cache_service.is_available():
+        cleared = cache_service.clear_cache(pattern)
+    
+    # Clear database cache
+    if not pattern or pattern == "search":
+        db.query(models.SearchCache).delete()
+        db.commit()
     
     return {
         "success": True,
-        "batch_id": batch_id,
-        "total": len(files),
-        "stats": stats,
-        "results": results,
-        "processing_mode": "immediate" if process_immediately else "background"
+        "cleared": cleared,
+        "message": f"Cleared cache with pattern: {pattern}" if pattern else "Cleared all cache"
     }
 
-# Health check with detailed metrics
-@app.get("/api/health/detailed")
-async def detailed_health_check(db: Session = Depends(get_db)):
-    """Comprehensive health check"""
-    health_data = {
-        "status": "healthy",
-        "timestamp": datetime.now().isoformat(),
-        "services": {}
+@app.get("/api/stats")
+async def get_stats(db: Session = Depends(get_db)):
+    """Get comprehensive statistics"""
+    # Database stats
+    total_images = db.query(models.Image).count()
+    processed_images = db.query(models.Image).filter_by(processed=2).count()
+    total_faces = db.query(models.FaceEmbedding).count()
+    
+    # Cache stats
+    cache_stats = cache_service.get_cache_stats() if cache_service.is_available() else {}
+    
+    # Recent activity
+    recent_uploads = db.query(
+        func.date(models.Image.uploaded_at).label('date'),
+        func.count(models.Image.id).label('count')
+    ).group_by(
+        func.date(models.Image.uploaded_at)
+    ).order_by(
+        desc('date')
+    ).limit(7).all()
+    
+    return {
+        "database": {
+            "total_images": total_images,
+            "processed_images": processed_images,
+            "processing_images": total_images - processed_images,
+            "total_faces": total_faces,
+            "avg_faces_per_image": round(total_faces / processed_images, 2) if processed_images > 0 else 0
+        },
+        "cache": cache_stats,
+        "recent_activity": [
+            {"date": str(r.date), "uploads": r.count}
+            for r in recent_uploads
+        ]
     }
+
+@app.get("/api/download/{image_id}")
+async def get_download_url(
+    image_id: int,
+    quality: str = Query("full", regex="^(full|display|original)$"),
+    db: Session = Depends(get_db)
+):
+    """Get download URL for image"""
+    image = db.query(models.Image).filter_by(id=image_id).first()
     
-    # Database health
-    try:
-        db.execute(text("SELECT 1"))
-        db_latency_start = time.time()
-        db.execute(text("SELECT COUNT(*) FROM images LIMIT 1"))
-        db_latency = (time.time() - db_latency_start) * 1000
-        
-        health_data["services"]["database"] = {
-            "status": "healthy",
-            "latency_ms": round(db_latency, 2)
-        }
-    except Exception as e:
-        health_data["services"]["database"] = {
-            "status": "unhealthy",
-            "error": str(e)
-        }
+    if not image:
+        raise HTTPException(status_code=404, detail="Image not found")
     
-    # Cache health
-    cache_healthy = cache_service.is_available()
-    if cache_healthy:
-        cache_stats = cache_service.get_cache_stats()
-        health_data["services"]["cache"] = {
-            "status": "healthy",
-            "stats": cache_stats
-        }
+    if quality == "original":
+        download_url = image.url
     else:
-        health_data["services"]["cache"] = {"status": "unavailable"}
+        download_url = cdn_service.get_optimized_url(image.url, quality)
     
-    # Face API health
-    face_api_healthy = face_service.health_check()
-    health_data["services"]["face_api"] = {
-        "status": "healthy" if face_api_healthy else "unhealthy"
+    # Add download headers
+    download_url = cdn_service.get_download_url(
+        download_url, 
+        f"event_photo_{image_id}.jpg"
+    )
+    
+    return {
+        "image_id": image_id,
+        "download_url": download_url,
+        "quality": quality
     }
-    
-    # Processing pipeline stats
-    processing_stats = processing_pipeline.get_processing_stats()
-    health_data["services"]["processing"] = {
-        "status": "healthy",
-        "stats": processing_stats
-    }
-    
-    # Overall health
-    unhealthy_services = [
-        k for k, v in health_data["services"].items() 
-        if v.get("status") != "healthy"
-    ]
-    
-    if unhealthy_services:
-        health_data["status"] = "degraded"
-        health_data["unhealthy_services"] = unhealthy_services
-    
-    status_code = 200 if health_data["status"] == "healthy" else 503
-    return JSONResponse(content=health_data, status_code=status_code)
-
-# Initialize FastAPI cache
-@app.on_event("startup")
-async def startup_event():
-    """Initialize optimizations on startup"""
-    if cache_service.is_available():
-        redis_backend = RedisBackend(cache_service.redis_client)
-        FastAPICache.init(redis_backend, prefix="fastapi-cache")
-        
-        # Warm up cache
-        try:
-            db = next(get_db())
-            cache_service.warm_up_cache(db, limit=1000)
-            db.close()
-        except:
-            pass
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(
-        app, 
-        host="0.0.0.0", 
-        port=8000,
-        workers=4,  # Multiple workers for production
-        access_log=False,  # Disable for performance
-        server_header=False
-    )
+    uvicorn.run(app, host="0.0.0.0", port=8000)
