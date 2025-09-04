@@ -349,7 +349,7 @@ async def search_faces(
     and_(
         models.FaceEmbedding.quality_score >= min_quality,
         models.Image.processed == 2,
-        # Pre-filter by norm range (rough similarity)
+        # Pre-filter by norm range (rough similarity))
         models.EmbeddingIndex.norm.between(
             query_norm - 0.8, 
             query_norm + 0.8
