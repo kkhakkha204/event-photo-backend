@@ -338,13 +338,22 @@ async def search_faces(
     models.FaceEmbedding.bbox,
     models.FaceEmbedding.quality_score,
     models.Image.url,
-    models.Image.uploaded_at
+    models.Image.uploaded_at,
+    models.EmbeddingIndex.norm
 ).join(
     models.Image
+).join(
+    models.EmbeddingIndex, 
+    models.FaceEmbedding.id == models.EmbeddingIndex.face_embedding_id
 ).filter(
     and_(
         models.FaceEmbedding.quality_score >= min_quality,
-        models.Image.processed == 2
+        models.Image.processed == 2,
+        # Pre-filter by norm range (rough similarity)
+        models.EmbeddingIndex.norm.between(
+            query_norm - 0.8, 
+            query_norm + 0.8
+        )
     )
 )
         
