@@ -740,33 +740,25 @@ async def get_download_url(
         "quality": quality
     }
 
-@app.delete("/api/image/{image_id}")
-async def delete_image(
-    image_id: int,
-    db: Session = Depends(get_db)
-):
+@app.delete("/api/clear-all")
+async def clear_all_data(db: Session = Depends(get_db)):
+    """Xóa tất cả dữ liệu trong database"""
     try:
-        # Find image
-        image = db.query(models.Image).filter_by(id=image_id).first()
+        # Clear cache first
+        if cache_service.is_available():
+            cache_service.clear_cache()
         
-        if not image:
-            raise HTTPException(status_code=404, detail="Image not found")
+        # Delete all data
+        db.query(models.EmbeddingIndex).delete()
+        db.query(models.FaceEmbedding).delete()
+        db.query(models.Image).delete()
+        db.query(models.SearchCache).delete()
         
-        # Delete face embeddings first (cascade should handle this)
-        db.query(models.FaceEmbedding).filter_by(image_id=image_id).delete()
-        
-        # Delete embedding indexes
-        embedding_ids = db.query(models.FaceEmbedding.id).filter_by(image_id=image_id).all()
-        for emb_id in embedding_ids:
-            db.query(models.EmbeddingIndex).filter_by(face_embedding_id=emb_id[0]).delete()
-        
-        # Delete image record
-        db.delete(image)
         db.commit()
         
         return {
             "success": True,
-            "message": f"Image {image_id} deleted successfully"
+            "message": "Đã xóa tất cả dữ liệu thành công"
         }
         
     except Exception as e:
