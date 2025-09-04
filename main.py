@@ -365,7 +365,7 @@ async def search_faces(
         
         results = query.all()
         
-        # Prepare embeddings data
+        # Prepare embeddings dataa
         embeddings_data = [
             {
                 'id': r.id,
