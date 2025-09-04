@@ -19,6 +19,7 @@ import json
 from datetime import datetime, timedelta
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+from models import EmbeddingIndex
 
 load_dotenv()
 
@@ -329,27 +330,36 @@ async def search_faces(
         
         # Query with optimizations
         query = db.query(
-            models.FaceEmbedding.id,
-            models.FaceEmbedding.image_id,
-            models.FaceEmbedding.embedding,
-            models.FaceEmbedding.bbox,
-            models.FaceEmbedding.quality_score,
-            models.Image.url,
-            models.Image.uploaded_at
-        ).join(
-            models.Image
-        ).filter(
-            and_(
-                models.FaceEmbedding.quality_score >= min_quality,
-                models.Image.processed == 2
-            )
+    models.FaceEmbedding.id,
+    models.FaceEmbedding.image_id,
+    models.FaceEmbedding.embedding,
+    models.FaceEmbedding.bbox,
+    models.FaceEmbedding.quality_score,
+    models.Image.url,
+    models.Image.uploaded_at,
+    models.EmbeddingIndex.norm
+).join(
+    models.Image
+).join(
+    models.EmbeddingIndex, 
+    models.FaceEmbedding.id == models.EmbeddingIndex.face_embedding_id
+).filter(
+    and_(
+        models.FaceEmbedding.quality_score >= min_quality,
+        models.Image.processed == 2,
+        # Pre-filter by norm range (rough similarity)
+        models.EmbeddingIndex.norm.between(
+            query_norm - 0.5, 
+            query_norm + 0.5
         )
+    )
+)
         
         # Limit scope for strict mode
         if mode == "strict":
-            query = query.order_by(desc(models.Image.uploaded_at)).limit(5000)
+            query = query.order_by(desc(models.Image.uploaded_at)).limit(4000)
         else:
-            query = query.limit(10000)
+            query = query.limit(6000)
         
         results = query.all()
         

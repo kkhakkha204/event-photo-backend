@@ -68,3 +68,15 @@ class EmbeddingIndex(Base):
     __table_args__ = (
         Index('idx_embedding_norm', 'norm'),
     )
+
+def create_embedding_index(db, face_embedding_id, embedding):
+    norm = np.linalg.norm(embedding)
+    
+    index = EmbeddingIndex(
+        face_embedding_id=face_embedding_id,
+        norm=float(norm),
+        embedding_binary=base64.b64encode(
+            np.array(embedding, dtype=np.float32).tobytes()
+        ).decode()
+    )
+    db.add(index)
