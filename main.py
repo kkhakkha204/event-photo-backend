@@ -119,16 +119,56 @@ async def health_check(db: Session = Depends(get_db)):
         "face_api": face_service.health_check()
     }
 
+# Thay thế endpoint upload trong main.py
+
 @app.post("/api/upload")
 async def upload_image_endpoint(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     event_id: Optional[int] = None,
     process_immediately: bool = Query(False),
+    auto_compress: bool = Query(True),  # Tự động nén
     db: Session = Depends(get_db)
 ):
     try:
         contents = await file.read()
+        
+        # Check file size
+        file_size_mb = len(contents) / 1024 / 1024
+        print(f"📁 Upload file: {file.filename} ({file_size_mb:.1f}MB)")
+        
+        # Validate file type
+        if not file.content_type or not file.content_type.startswith('image/'):
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Invalid file type: {file.content_type}. Only images are allowed."
+            )
+        
+        # Auto compress if file is too large
+        if file_size_mb > 9.5 and auto_compress:
+            print(f"⚡ Auto-compressing large file ({file_size_mb:.1f}MB)...")
+            from config import compress_image
+            contents = compress_image(contents)
+            new_size_mb = len(contents) / 1024 / 1024
+            print(f"✓ Compressed: {file_size_mb:.1f}MB → {new_size_mb:.1f}MB")
+        
+        # Hard limit check
+        if len(contents) > 10 * 1024 * 1024:  # 10MB
+            raise HTTPException(
+                status_code=413,
+                detail={
+                    "error": "File too large",
+                    "original_size_mb": round(file_size_mb, 1),
+                    "max_size_mb": 10,
+                    "message": "File exceeds 10MB limit. Please compress the image or upgrade Cloudinary plan.",
+                    "suggestions": [
+                        "Resize image to smaller dimensions",
+                        "Reduce image quality/compression", 
+                        "Convert to JPEG format",
+                        "Use online image compressor"
+                    ]
+                }
+            )
         
         # Check for duplicates
         file_hash = calculate_file_hash(contents)
@@ -147,7 +187,27 @@ async def upload_image_endpoint(
             )
         
         # Upload to Cloudinary
-        url = upload_image(contents)
+        try:
+            url = upload_image(contents)
+        except Exception as upload_error:
+            error_msg = str(upload_error)
+            
+            if "File size too large" in error_msg:
+                raise HTTPException(
+                    status_code=413,
+                    detail={
+                        "error": "Cloudinary file size limit exceeded",
+                        "size_mb": round(len(contents) / 1024 / 1024, 1),
+                        "message": "File is too large for current Cloudinary plan",
+                        "solutions": [
+                            "Compress image further",
+                            "Upgrade Cloudinary plan",
+                            "Use smaller image dimensions"
+                        ]
+                    }
+                )
+            else:
+                raise HTTPException(status_code=500, detail=f"Upload failed: {error_msg}")
         
         # Save image record
         db_image = models.Image(
@@ -171,7 +231,12 @@ async def upload_image_endpoint(
                 "url": url,
                 "optimized_urls": cdn_service.get_responsive_urls(url),
                 "faces_detected": len(faces),
-                "processing": "completed"
+                "processing": "completed",
+                "file_info": {
+                    "original_size_mb": round(file_size_mb, 1),
+                    "final_size_mb": round(len(contents) / 1024 / 1024, 1),
+                    "compressed": file_size_mb != len(contents) / 1024 / 1024
+                }
             }
         else:
             # Process in background
@@ -186,9 +251,16 @@ async def upload_image_endpoint(
                 "image_id": db_image.id,
                 "url": url,
                 "optimized_urls": cdn_service.get_responsive_urls(url),
-                "processing": "background"
+                "processing": "background",
+                "file_info": {
+                    "original_size_mb": round(file_size_mb, 1),
+                    "final_size_mb": round(len(contents) / 1024 / 1024, 1),
+                    "compressed": file_size_mb != len(contents) / 1024 / 1024
+                }
             }
         
+    except HTTPException:
+        raise
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
