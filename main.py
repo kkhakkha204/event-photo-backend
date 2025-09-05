@@ -174,11 +174,11 @@ async def upload_image_endpoint(
             url = upload_image(compressed_contents)
         except Exception as upload_error:
             # If compressed image still fails, try with more aggressive compression
-            if "File size too large" in str(upload_error) and compression_info['compressed_size'] > 5 * 1024 * 1024:
+            if "File size too large" in str(upload_error) and compression_info['compressed_size'] > 6 * 1024 * 1024:
                 print("Upload failed, trying more aggressive compression...")
                 compressed_contents, compression_info = image_processor.compress_image(
                     contents, 
-                    target_size=5 * 1024 * 1024  # 5MB target
+                    target_size=6 * 1024 * 1024  # 6MB target as fallback
                 )
                 file_hash = calculate_file_hash(compressed_contents)
                 url = upload_image(compressed_contents)

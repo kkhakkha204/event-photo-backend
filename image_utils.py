@@ -13,10 +13,10 @@ class ImageProcessor:
     """
     
     def __init__(self):
-        self.max_file_size = 8 * 1024 * 1024  # 8MB
-        self.max_dimension = 1920  # Optimal for face detection
+        self.max_file_size = 9 * 1024 * 1024  # 9MB (close to 10MB limit)
+        self.max_dimension = 2048  # Higher resolution for better quality
         self.min_dimension = 640   # Minimum for good face detection
-        self.quality_levels = [90, 85, 80, 75, 70, 65, 60]  # Progressive quality reduction
+        self.quality_levels = [95, 90, 85, 82, 78, 75, 72]  # Higher quality levels
     
     def get_image_info(self, image_bytes: bytes) -> Dict[str, Any]:
         """Get image information"""
