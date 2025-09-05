@@ -16,62 +16,88 @@ cloudinary.config(
 
 def compress_image(file_content: bytes, max_size_mb: float = 9.0) -> bytes:
     """
-    Nén ảnh để giảm kích thước file
-    max_size_mb: kích thước tối đa (MB)
+    Nén ảnh thông minh để bảo tồn face detection accuracy
     """
     max_size_bytes = max_size_mb * 1024 * 1024
     
-    # Nếu file đã nhỏ hơn giới hạn thì return nguyên bản
     if len(file_content) <= max_size_bytes:
         return file_content
     
     try:
-        # Mở ảnh
         image = Image.open(io.BytesIO(file_content))
         
         # Chuyển sang RGB nếu cần
         if image.mode in ('RGBA', 'P'):
             image = image.convert('RGB')
         
-        # Thử giảm chất lượng trước
-        for quality in [85, 75, 65, 55, 45]:
+        original_width, original_height = image.size
+        print(f"Original size: {original_width}x{original_height}, {len(file_content)/1024/1024:.1f}MB")
+        
+        # STRATEGY 1: Giữ nguyên kích thước, chỉ giảm quality nhẹ
+        # Face detection hoạt động tốt nhất với resolution cao
+        for quality in [90, 85, 80, 75]:
             output = io.BytesIO()
             image.save(output, format='JPEG', quality=quality, optimize=True)
             compressed_content = output.getvalue()
             
             if len(compressed_content) <= max_size_bytes:
-                print(f"✓ Compressed image: {len(file_content)/1024/1024:.1f}MB → {len(compressed_content)/1024/1024:.1f}MB (quality={quality})")
+                print(f"✓ Quality compression: {len(file_content)/1024/1024:.1f}MB → {len(compressed_content)/1024/1024:.1f}MB (Q={quality})")
                 return compressed_content
         
-        # Nếu vẫn quá lớn, resize ảnh
-        original_width, original_height = image.size
-        
-        for scale in [0.9, 0.8, 0.7, 0.6, 0.5]:
-            new_width = int(original_width * scale)
-            new_height = int(original_height * scale)
+        # STRATEGY 2: Resize thông minh - giữ tỷ lệ faces
+        # Chỉ resize khi thực sự cần thiết
+        if original_width > 2000 or original_height > 2000:
+            # Resize xuống mức vừa phải để giữ chi tiết faces
+            max_dimension = 1600  # Đủ lớn cho face detection
+            if original_width > original_height:
+                new_width = max_dimension
+                new_height = int(original_height * max_dimension / original_width)
+            else:
+                new_height = max_dimension
+                new_width = int(original_width * max_dimension / original_height)
             
+            # Sử dụng Lanczos resampling để giữ chi tiết tốt nhất
             resized_image = image.resize((new_width, new_height), Image.Lanczos)
             
-            # Thử các quality khác nhau
-            for quality in [75, 65, 55]:
+            for quality in [85, 80, 75, 70]:
                 output = io.BytesIO()
                 resized_image.save(output, format='JPEG', quality=quality, optimize=True)
                 compressed_content = output.getvalue()
                 
                 if len(compressed_content) <= max_size_bytes:
-                    print(f"✓ Resized and compressed: {original_width}x{original_height} → {new_width}x{new_height}, {len(file_content)/1024/1024:.1f}MB → {len(compressed_content)/1024/1024:.1f}MB")
+                    print(f"✓ Smart resize: {original_width}x{original_height} → {new_width}x{new_height}, Q={quality}")
                     return compressed_content
         
-        # Nếu vẫn không được, trả về phiên bản nén tối đa
-        output = io.BytesIO()
-        final_image = image.resize((int(original_width * 0.4), int(original_height * 0.4)), Image.Lanczos)
-        final_image.save(output, format='JPEG', quality=40, optimize=True)
-        return output.getvalue()
+        # STRATEGY 3: Progressive resize với quality cao
+        for scale in [0.85, 0.75, 0.65]:
+            new_width = int(original_width * scale)
+            new_height = int(original_height * scale)
+            
+            # Đảm bảo không resize quá nhỏ (tối thiểu 800px cho cạnh lớn nhất)
+            max_side = max(new_width, new_height)
+            if max_side < 800:
+                continue
+            
+            resized_image = image.resize((new_width, new_height), Image.Lanczos)
+            
+            # Dùng quality cao hơn cho ảnh đã resize
+            for quality in [80, 75, 70]:
+                output = io.BytesIO()
+                resized_image.save(output, format='JPEG', quality=quality, optimize=True)
+                compressed_content = output.getvalue()
+                
+                if len(compressed_content) <= max_size_bytes:
+                    print(f"✓ Progressive resize: {new_width}x{new_height}, Q={quality}")
+                    return compressed_content
+        
+        # FALLBACK: Nếu vẫn không được, báo lỗi thay vì nén quá mạnh
+        print(f"✗ Cannot compress without losing too much quality")
+        raise Exception("Image too large and cannot be compressed safely for face detection")
         
     except Exception as e:
-        print(f"✗ Error compressing image: {e}")
-        # Nếu có lỗi, trả về nguyên bản
-        return file_content
+        print(f"Compression error: {e}")
+        # Thay vì return nguyên bản, raise error để user biết
+        raise e
 
 def upload_image(file):
     """Upload image to Cloudinary với nén ảnh tự động"""

@@ -127,48 +127,54 @@ async def upload_image_endpoint(
     file: UploadFile = File(...),
     event_id: Optional[int] = None,
     process_immediately: bool = Query(False),
-    auto_compress: bool = Query(True),  # Tự động nén
+    force_compress: bool = Query(False),  # Option để force compress
     db: Session = Depends(get_db)
 ):
     try:
         contents = await file.read()
-        
-        # Check file size
         file_size_mb = len(contents) / 1024 / 1024
-        print(f"📁 Upload file: {file.filename} ({file_size_mb:.1f}MB)")
+        
+        print(f"📁 Upload: {file.filename} ({file_size_mb:.1f}MB)")
         
         # Validate file type
         if not file.content_type or not file.content_type.startswith('image/'):
-            raise HTTPException(
-                status_code=400, 
-                detail=f"Invalid file type: {file.content_type}. Only images are allowed."
-            )
+            raise HTTPException(status_code=400, detail="Invalid file type")
         
-        # Auto compress if file is too large
-        if file_size_mb > 9.5 and auto_compress:
-            print(f"⚡ Auto-compressing large file ({file_size_mb:.1f}MB)...")
-            from config import compress_image
-            contents = compress_image(contents)
-            new_size_mb = len(contents) / 1024 / 1024
-            print(f"✓ Compressed: {file_size_mb:.1f}MB → {new_size_mb:.1f}MB")
+        # Smart compression strategy
+        original_size = len(contents)
         
-        # Hard limit check
-        if len(contents) > 10 * 1024 * 1024:  # 10MB
-            raise HTTPException(
-                status_code=413,
-                detail={
-                    "error": "File too large",
-                    "original_size_mb": round(file_size_mb, 1),
-                    "max_size_mb": 10,
-                    "message": "File exceeds 10MB limit. Please compress the image or upgrade Cloudinary plan.",
-                    "suggestions": [
-                        "Resize image to smaller dimensions",
-                        "Reduce image quality/compression", 
-                        "Convert to JPEG format",
-                        "Use online image compressor"
-                    ]
-                }
-            )
+        if file_size_mb > 9.5:
+            try:
+                print(f"⚡ Compressing large file ({file_size_mb:.1f}MB)...")
+                contents = compress_image(contents)
+                new_size_mb = len(contents) / 1024 / 1024
+                print(f"✓ Compressed: {file_size_mb:.1f}MB → {new_size_mb:.1f}MB")
+                
+                # Warning nếu nén quá nhiều
+                compression_ratio = len(contents) / original_size
+                if compression_ratio < 0.3:  # Nén hơn 70%
+                    print(f"⚠️ Heavy compression ({compression_ratio:.1%}) may affect face detection")
+                
+            except Exception as compress_error:
+                if force_compress:
+                    # Force compress với minimal settings
+                    contents = force_minimal_compression(contents)
+                    print("⚠️ Force compressed - may affect accuracy")
+                else:
+                    raise HTTPException(
+                        status_code=413,
+                        detail={
+                            "error": "File too large for optimal face detection",
+                            "size_mb": round(file_size_mb, 1),
+                            "message": "Image is too large and cannot be compressed without losing face detection accuracy",
+                            "solutions": [
+                                "Resize image to max 1600px width/height",
+                                "Use JPEG format with 80-90% quality",
+                                "Remove unnecessary metadata",
+                                "Use ?force_compress=true to force compression (may reduce accuracy)"
+                            ]
+                        }
+                    )
         
         # Check for duplicates
         file_hash = calculate_file_hash(contents)
