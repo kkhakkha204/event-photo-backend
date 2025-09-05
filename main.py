@@ -173,12 +173,13 @@ async def upload_image_endpoint(
         try:
             url = upload_image(compressed_contents)
         except Exception as upload_error:
-            # If compressed image still fails, try with more aggressive compression
-            if "File size too large" in str(upload_error) and compression_info['compressed_size'] > 6 * 1024 * 1024:
-                print("Upload failed, trying more aggressive compression...")
+            # If compressed image still fails, try with conservative fallback
+            if "File size too large" in str(upload_error) and compression_info['compressed_size'] > 8 * 1024 * 1024:
+                print("Upload failed, trying conservative fallback compression...")
+                # Use 8MB target instead of 6MB - still preserves quality
                 compressed_contents, compression_info = image_processor.compress_image(
                     contents, 
-                    target_size=6 * 1024 * 1024  # 6MB target as fallback
+                    target_size=8 * 1024 * 1024  # 8MB target - more conservative
                 )
                 file_hash = calculate_file_hash(compressed_contents)
                 url = upload_image(compressed_contents)
@@ -688,9 +689,10 @@ async def batch_upload(
                 url = upload_image(compressed_contents)
             except Exception as upload_error:
                 if "File size too large" in str(upload_error):
-                    # Try more aggressive compression
+                    # Try conservative fallback compression
+                    print(f"Upload failed for {file.filename}, trying conservative fallback...")
                     compressed_contents, compression_info = image_processor.compress_image(
-                        contents, target_size=5 * 1024 * 1024
+                        contents, target_size=8 * 1024 * 1024  # 8MB instead of 5MB
                     )
                     file_hash = calculate_file_hash(compressed_contents)
                     url = upload_image(compressed_contents)
