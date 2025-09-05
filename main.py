@@ -173,14 +173,11 @@ async def upload_image_endpoint(
         try:
             url = upload_image(compressed_contents)
         except Exception as upload_error:
-            # If compressed image still fails, try with conservative fallback
-            if "File size too large" in str(upload_error) and compression_info['compressed_size'] > 8 * 1024 * 1024:
-                print("Upload failed, trying conservative fallback compression...")
-                # Use 8MB target instead of 6MB - still preserves quality
-                compressed_contents, compression_info = image_processor.compress_image(
-                    contents, 
-                    target_size=8 * 1024 * 1024  # 8MB target - more conservative
-                )
+            # If compressed image still fails, let image_processor decide compression
+            if "File size too large" in str(upload_error):
+                print("Upload failed, trying image_processor auto-compression...")
+                # BỎ target_size parameter - để image_processor tự quyết định
+                compressed_contents, compression_info = image_processor.compress_image(contents)
                 file_hash = calculate_file_hash(compressed_contents)
                 url = upload_image(compressed_contents)
             else:
@@ -689,11 +686,10 @@ async def batch_upload(
                 url = upload_image(compressed_contents)
             except Exception as upload_error:
                 if "File size too large" in str(upload_error):
-                    # Try conservative fallback compression
-                    print(f"Upload failed for {file.filename}, trying conservative fallback...")
-                    compressed_contents, compression_info = image_processor.compress_image(
-                        contents, target_size=8 * 1024 * 1024  # 8MB instead of 5MB
-                    )
+                    # Let image_processor auto-decide compression
+                    print(f"Upload failed for {file.filename}, trying auto-compression...")
+                    # BỎ target_size parameter
+                    compressed_contents, compression_info = image_processor.compress_image(contents)
                     file_hash = calculate_file_hash(compressed_contents)
                     url = upload_image(compressed_contents)
                 else:
