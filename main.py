@@ -20,6 +20,7 @@ from datetime import datetime, timedelta
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from models import EmbeddingIndex
+from image_utils import image_processor
 
 load_dotenv()
 
@@ -129,9 +130,30 @@ async def upload_image_endpoint(
 ):
     try:
         contents = await file.read()
+        original_size = len(contents)
         
-        # Check for duplicates
-        file_hash = calculate_file_hash(contents)
+        # Validate image
+        is_valid, validation_message = image_processor.validate_image(contents)
+        if not is_valid:
+            raise HTTPException(status_code=400, detail=validation_message)
+        
+        # Get image info for logging
+        image_info = image_processor.get_image_info(contents)
+        print(f"Processing image: {file.filename}")
+        print(f"Original: {image_info.get('size', 'unknown')} pixels, "
+              f"{original_size / (1024*1024):.1f}MB, format: {image_info.get('format', 'unknown')}")
+        
+        # Compress image if needed
+        compressed_contents, compression_info = image_processor.compress_image(contents)
+        
+        # Log compression results
+        if compression_info['compression_ratio'] < 1.0:
+            print(f"Compressed: {compression_info['original_size']} -> {compression_info['compressed_size']} bytes "
+                  f"(ratio: {compression_info['compression_ratio']:.2f}, "
+                  f"quality: {compression_info['quality_used']})")
+        
+        # Check for duplicates using compressed content hash
+        file_hash = calculate_file_hash(compressed_contents)
         existing = db.query(models.Image).filter_by(file_hash=file_hash).first()
         
         if existing:
@@ -139,15 +161,29 @@ async def upload_image_endpoint(
                 status_code=409,
                 content={
                     "success": False,
-                    "message": "Image already exists",
+                    "message": "Image already exists (after compression normalization)",
                     "image_id": existing.id,
                     "url": existing.url,
-                    "optimized_urls": cdn_service.get_responsive_urls(existing.url)
+                    "optimized_urls": cdn_service.get_responsive_urls(existing.url),
+                    "compression_info": compression_info
                 }
             )
         
-        # Upload to Cloudinary
-        url = upload_image(contents)
+        # Upload compressed image to Cloudinary
+        try:
+            url = upload_image(compressed_contents)
+        except Exception as upload_error:
+            # If compressed image still fails, try with more aggressive compression
+            if "File size too large" in str(upload_error) and compression_info['compressed_size'] > 5 * 1024 * 1024:
+                print("Upload failed, trying more aggressive compression...")
+                compressed_contents, compression_info = image_processor.compress_image(
+                    contents, 
+                    target_size=5 * 1024 * 1024  # 5MB target
+                )
+                file_hash = calculate_file_hash(compressed_contents)
+                url = upload_image(compressed_contents)
+            else:
+                raise upload_error
         
         # Save image record
         db_image = models.Image(
@@ -171,7 +207,15 @@ async def upload_image_endpoint(
                 "url": url,
                 "optimized_urls": cdn_service.get_responsive_urls(url),
                 "faces_detected": len(faces),
-                "processing": "completed"
+                "processing": "completed",
+                "compression_info": {
+                    "original_size_mb": round(compression_info['original_size'] / (1024*1024), 2),
+                    "compressed_size_mb": round(compression_info['compressed_size'] / (1024*1024), 2),
+                    "compression_ratio": round(compression_info['compression_ratio'], 3),
+                    "quality_used": compression_info['quality_used'],
+                    "dimensions_changed": compression_info.get('dimensions_changed', False),
+                    "savings_mb": round((compression_info['original_size'] - compression_info['compressed_size']) / (1024*1024), 2)
+                }
             }
         else:
             # Process in background
@@ -186,12 +230,25 @@ async def upload_image_endpoint(
                 "image_id": db_image.id,
                 "url": url,
                 "optimized_urls": cdn_service.get_responsive_urls(url),
-                "processing": "background"
+                "processing": "background",
+                "compression_info": {
+                    "original_size_mb": round(compression_info['original_size'] / (1024*1024), 2),
+                    "compressed_size_mb": round(compression_info['compressed_size'] / (1024*1024), 2),
+                    "compression_ratio": round(compression_info['compression_ratio'], 3),
+                    "quality_used": compression_info['quality_used'],
+                    "dimensions_changed": compression_info.get('dimensions_changed', False),
+                    "savings_mb": round((compression_info['original_size'] - compression_info['compressed_size']) / (1024*1024), 2)
+                }
             }
         
+    except HTTPException:
+        # Re-raise HTTP exceptions
+        raise
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"Upload error for {file.filename}: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+
 
 async def process_faces_immediate(image_id: int, url: str, db: Session) -> List[Dict]:
     """Process faces immediately and return results"""
@@ -587,29 +644,60 @@ async def batch_upload(
     event_id: Optional[int] = None,
     db: Session = Depends(get_db)
 ):
-    """Batch upload multiple images"""
+    """Batch upload multiple images with compression"""
     results = []
+    total_original_size = 0
+    total_compressed_size = 0
     
     for file in files[:50]:  # Max 50 files
         try:
             contents = await file.read()
-            file_hash = calculate_file_hash(contents)
+            original_size = len(contents)
+            total_original_size += original_size
+            
+            # Validate image
+            is_valid, validation_message = image_processor.validate_image(contents)
+            if not is_valid:
+                results.append({
+                    "filename": file.filename,
+                    "status": "error",
+                    "error": validation_message
+                })
+                continue
+            
+            # Compress image
+            compressed_contents, compression_info = image_processor.compress_image(contents)
+            total_compressed_size += compression_info['compressed_size']
             
             # Check duplicate
+            file_hash = calculate_file_hash(compressed_contents)
             existing = db.query(models.Image).filter_by(file_hash=file_hash).first()
+            
             if existing:
                 results.append({
                     "filename": file.filename,
                     "status": "duplicate",
                     "image_id": existing.id,
-                    "url": existing.url
+                    "url": existing.url,
+                    "compression_info": compression_info
                 })
                 continue
             
-            # Upload
-            url = upload_image(contents)
+            # Upload compressed image
+            try:
+                url = upload_image(compressed_contents)
+            except Exception as upload_error:
+                if "File size too large" in str(upload_error):
+                    # Try more aggressive compression
+                    compressed_contents, compression_info = image_processor.compress_image(
+                        contents, target_size=5 * 1024 * 1024
+                    )
+                    file_hash = calculate_file_hash(compressed_contents)
+                    url = upload_image(compressed_contents)
+                else:
+                    raise upload_error
             
-            # Save
+            # Save image record
             db_image = models.Image(
                 url=url,
                 event_id=event_id,
@@ -619,7 +707,7 @@ async def batch_upload(
             db.add(db_image)
             db.flush()
             
-            # Queue for processing
+            # Queue for background processing
             background_tasks.add_task(
                 process_faces_background,
                 db_image.id,
@@ -631,7 +719,13 @@ async def batch_upload(
                 "status": "uploaded",
                 "image_id": db_image.id,
                 "url": url,
-                "thumbnail": cdn_service.get_optimized_url(url, 'thumbnail')
+                "thumbnail": cdn_service.get_optimized_url(url, 'thumbnail'),
+                "compression_info": {
+                    "original_size_mb": round(compression_info['original_size'] / (1024*1024), 2),
+                    "compressed_size_mb": round(compression_info['compressed_size'] / (1024*1024), 2),
+                    "compression_ratio": round(compression_info['compression_ratio'], 3),
+                    "quality_used": compression_info['quality_used']
+                }
             })
             
         except Exception as e:
@@ -649,7 +743,13 @@ async def batch_upload(
         "uploaded": sum(1 for r in results if r["status"] == "uploaded"),
         "duplicates": sum(1 for r in results if r["status"] == "duplicate"),
         "errors": sum(1 for r in results if r["status"] == "error"),
-        "results": results
+        "results": results,
+        "compression_summary": {
+            "total_original_size_mb": round(total_original_size / (1024*1024), 2),
+            "total_compressed_size_mb": round(total_compressed_size / (1024*1024), 2),
+            "total_savings_mb": round((total_original_size - total_compressed_size) / (1024*1024), 2),
+            "compression_ratio": round(total_compressed_size / total_original_size, 3) if total_original_size > 0 else 1.0
+        }
     }
 
 @app.delete("/api/cache/clear")
