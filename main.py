@@ -119,62 +119,16 @@ async def health_check(db: Session = Depends(get_db)):
         "face_api": face_service.health_check()
     }
 
-# Thay thế endpoint upload trong main.py
-
 @app.post("/api/upload")
 async def upload_image_endpoint(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     event_id: Optional[int] = None,
     process_immediately: bool = Query(False),
-    force_compress: bool = Query(False),  # Option để force compress
     db: Session = Depends(get_db)
 ):
     try:
         contents = await file.read()
-        file_size_mb = len(contents) / 1024 / 1024
-        
-        print(f"📁 Upload: {file.filename} ({file_size_mb:.1f}MB)")
-        
-        # Validate file type
-        if not file.content_type or not file.content_type.startswith('image/'):
-            raise HTTPException(status_code=400, detail="Invalid file type")
-        
-        # Smart compression strategy
-        original_size = len(contents)
-        
-        if file_size_mb > 9.5:
-            try:
-                print(f"⚡ Compressing large file ({file_size_mb:.1f}MB)...")
-                contents = compress_image(contents)
-                new_size_mb = len(contents) / 1024 / 1024
-                print(f"✓ Compressed: {file_size_mb:.1f}MB → {new_size_mb:.1f}MB")
-                
-                # Warning nếu nén quá nhiều
-                compression_ratio = len(contents) / original_size
-                if compression_ratio < 0.3:  # Nén hơn 70%
-                    print(f"⚠️ Heavy compression ({compression_ratio:.1%}) may affect face detection")
-                
-            except Exception as compress_error:
-                if force_compress:
-                    # Force compress với minimal settings
-                    contents = force_minimal_compression(contents)
-                    print("⚠️ Force compressed - may affect accuracy")
-                else:
-                    raise HTTPException(
-                        status_code=413,
-                        detail={
-                            "error": "File too large for optimal face detection",
-                            "size_mb": round(file_size_mb, 1),
-                            "message": "Image is too large and cannot be compressed without losing face detection accuracy",
-                            "solutions": [
-                                "Resize image to max 1600px width/height",
-                                "Use JPEG format with 80-90% quality",
-                                "Remove unnecessary metadata",
-                                "Use ?force_compress=true to force compression (may reduce accuracy)"
-                            ]
-                        }
-                    )
         
         # Check for duplicates
         file_hash = calculate_file_hash(contents)
@@ -193,27 +147,7 @@ async def upload_image_endpoint(
             )
         
         # Upload to Cloudinary
-        try:
-            url = upload_image(contents)
-        except Exception as upload_error:
-            error_msg = str(upload_error)
-            
-            if "File size too large" in error_msg:
-                raise HTTPException(
-                    status_code=413,
-                    detail={
-                        "error": "Cloudinary file size limit exceeded",
-                        "size_mb": round(len(contents) / 1024 / 1024, 1),
-                        "message": "File is too large for current Cloudinary plan",
-                        "solutions": [
-                            "Compress image further",
-                            "Upgrade Cloudinary plan",
-                            "Use smaller image dimensions"
-                        ]
-                    }
-                )
-            else:
-                raise HTTPException(status_code=500, detail=f"Upload failed: {error_msg}")
+        url = upload_image(contents)
         
         # Save image record
         db_image = models.Image(
@@ -237,12 +171,7 @@ async def upload_image_endpoint(
                 "url": url,
                 "optimized_urls": cdn_service.get_responsive_urls(url),
                 "faces_detected": len(faces),
-                "processing": "completed",
-                "file_info": {
-                    "original_size_mb": round(file_size_mb, 1),
-                    "final_size_mb": round(len(contents) / 1024 / 1024, 1),
-                    "compressed": file_size_mb != len(contents) / 1024 / 1024
-                }
+                "processing": "completed"
             }
         else:
             # Process in background
@@ -257,16 +186,9 @@ async def upload_image_endpoint(
                 "image_id": db_image.id,
                 "url": url,
                 "optimized_urls": cdn_service.get_responsive_urls(url),
-                "processing": "background",
-                "file_info": {
-                    "original_size_mb": round(file_size_mb, 1),
-                    "final_size_mb": round(len(contents) / 1024 / 1024, 1),
-                    "compressed": file_size_mb != len(contents) / 1024 / 1024
-                }
+                "processing": "background"
             }
         
-    except HTTPException:
-        raise
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
