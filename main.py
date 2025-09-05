@@ -21,7 +21,7 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from models import EmbeddingIndex
 from image_utils import image_processor
-import asyncio
+
 load_dotenv()
 
 models.Base.metadata.create_all(bind=engine)
@@ -642,118 +642,96 @@ async def batch_upload(
     event_id: Optional[int] = None,
     db: Session = Depends(get_db)
 ):
-    """Batch upload multiple images with compression and memory optimization"""
+    """Batch upload multiple images with compression"""
     results = []
     total_original_size = 0
     total_compressed_size = 0
     
-    # Process in batches of 5 to prevent memory spikes
-    batch_size = 5
-    max_files = min(len(files), 50)  # Max 50 files
-    
-    for i in range(0, max_files, batch_size):
-        batch_files = files[i:i+batch_size]
-        print(f"Processing batch {i//batch_size + 1}/{(max_files + batch_size - 1)//batch_size}")
-        
-        for file in batch_files:
-            try:
-                contents = await file.read()
-                original_size = len(contents)
-                total_original_size += original_size
-                
-                # Validate image
-                is_valid, validation_message = image_processor.validate_image(contents)
-                if not is_valid:
-                    results.append({
-                        "filename": file.filename,
-                        "status": "error",
-                        "error": validation_message
-                    })
-                    continue
-                
-                # Compress image
-                compressed_contents, compression_info = image_processor.compress_image(contents)
-                total_compressed_size += compression_info['compressed_size']
-                
-                # Skip very small images to save Face API calls
-                if compression_info['compressed_size'] < 100*1024:  # Skip < 100KB
-                    results.append({
-                        "filename": file.filename,
-                        "status": "skipped",
-                        "reason": "Image too small for face detection"
-                    })
-                    continue
-                
-                # Check duplicate
-                file_hash = calculate_file_hash(compressed_contents)
-                existing = db.query(models.Image).filter_by(file_hash=file_hash).first()
-                
-                if existing:
-                    results.append({
-                        "filename": file.filename,
-                        "status": "duplicate",
-                        "image_id": existing.id,
-                        "url": existing.url,
-                        "compression_info": compression_info
-                    })
-                    continue
-                
-                # Upload compressed image
-                try:
-                    url = upload_image(compressed_contents)
-                except Exception as upload_error:
-                    if "File size too large" in str(upload_error):
-                        # Let image_processor auto-decide compression
-                        print(f"Upload failed for {file.filename}, trying auto-compression...")
-                        compressed_contents, compression_info = image_processor.compress_image(contents)
-                        file_hash = calculate_file_hash(compressed_contents)
-                        url = upload_image(compressed_contents)
-                    else:
-                        raise upload_error
-                
-                # Save image record
-                db_image = models.Image(
-                    url=url,
-                    event_id=event_id,
-                    file_hash=file_hash,
-                    processed=0
-                )
-                db.add(db_image)
-                db.flush()
-                
-                # Queue for background processing with delay
-                background_tasks.add_task(
-                    process_faces_background_delayed,
-                    db_image.id,
-                    url,
-                    delay_seconds=i * 2  # Stagger processing
-                )
-                
-                results.append({
-                    "filename": file.filename,
-                    "status": "uploaded",
-                    "image_id": db_image.id,
-                    "url": url,
-                    "thumbnail": cdn_service.get_optimized_url(url, 'thumbnail'),
-                    "compression_info": {
-                        "original_size_mb": round(compression_info['original_size'] / (1024*1024), 2),
-                        "compressed_size_mb": round(compression_info['compressed_size'] / (1024*1024), 2),
-                        "compression_ratio": round(compression_info['compression_ratio'], 3),
-                        "quality_used": compression_info['quality_used']
-                    }
-                })
-                
-            except Exception as e:
+    for file in files[:50]:  # Max 50 files
+        try:
+            contents = await file.read()
+            original_size = len(contents)
+            total_original_size += original_size
+            
+            # Validate image
+            is_valid, validation_message = image_processor.validate_image(contents)
+            if not is_valid:
                 results.append({
                     "filename": file.filename,
                     "status": "error",
-                    "error": str(e)
+                    "error": validation_message
                 })
-        
-        # Wait between batches to prevent Face API overload
-        if i + batch_size < max_files:
-            print(f"Waiting 10 seconds before next batch...")
-            await asyncio.sleep(10)
+                continue
+            
+            # Compress image
+            compressed_contents, compression_info = image_processor.compress_image(contents)
+            total_compressed_size += compression_info['compressed_size']
+            
+            # Check duplicate
+            file_hash = calculate_file_hash(compressed_contents)
+            existing = db.query(models.Image).filter_by(file_hash=file_hash).first()
+            
+            if existing:
+                results.append({
+                    "filename": file.filename,
+                    "status": "duplicate",
+                    "image_id": existing.id,
+                    "url": existing.url,
+                    "compression_info": compression_info
+                })
+                continue
+            
+            # Upload compressed image
+            try:
+                url = upload_image(compressed_contents)
+            except Exception as upload_error:
+                if "File size too large" in str(upload_error):
+                    # Let image_processor auto-decide compression
+                    print(f"Upload failed for {file.filename}, trying auto-compression...")
+                    # BỎ target_size parameter
+                    compressed_contents, compression_info = image_processor.compress_image(contents)
+                    file_hash = calculate_file_hash(compressed_contents)
+                    url = upload_image(compressed_contents)
+                else:
+                    raise upload_error
+            
+            # Save image record
+            db_image = models.Image(
+                url=url,
+                event_id=event_id,
+                file_hash=file_hash,
+                processed=0
+            )
+            db.add(db_image)
+            db.flush()
+            
+            # Queue for background processing
+            background_tasks.add_task(
+                process_faces_background,
+                db_image.id,
+                url
+            )
+            
+            results.append({
+                "filename": file.filename,
+                "status": "uploaded",
+                "image_id": db_image.id,
+                "url": url,
+                "thumbnail": cdn_service.get_optimized_url(url, 'thumbnail'),
+                "compression_info": {
+                    "original_size_mb": round(compression_info['original_size'] / (1024*1024), 2),
+                    "compressed_size_mb": round(compression_info['compressed_size'] / (1024*1024), 2),
+                    "compression_ratio": round(compression_info['compression_ratio'], 3),
+                    "quality_used": compression_info['quality_used']
+                }
+            })
+            
+        except Exception as e:
+            results.append({
+                "filename": file.filename,
+                "status": "error",
+                "error": str(e)
+            })
     
     db.commit()
     
@@ -762,7 +740,6 @@ async def batch_upload(
         "total": len(files),
         "uploaded": sum(1 for r in results if r["status"] == "uploaded"),
         "duplicates": sum(1 for r in results if r["status"] == "duplicate"),
-        "skipped": sum(1 for r in results if r["status"] == "skipped"),
         "errors": sum(1 for r in results if r["status"] == "error"),
         "results": results,
         "compression_summary": {
@@ -772,15 +749,6 @@ async def batch_upload(
             "compression_ratio": round(total_compressed_size / total_original_size, 3) if total_original_size > 0 else 1.0
         }
     }
-
-# Add this helper function for delayed processing
-def process_faces_background_delayed(image_id: int, url: str, delay_seconds: int = 0):
-    """Background task with delay to stagger Face API calls"""
-    import time
-    if delay_seconds > 0:
-        time.sleep(delay_seconds)
-    
-    process_faces_background(image_id, url)
 
 @app.delete("/api/cache/clear")
 async def clear_cache(
