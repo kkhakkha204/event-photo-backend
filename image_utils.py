@@ -167,12 +167,14 @@ class ImageProcessor:
             for quality in self.quality_levels:
                 output = io.BytesIO()
                 
-                # Save with optimization
+                # Save with premium optimization settings
                 save_kwargs = {
                     'format': 'JPEG',
                     'quality': quality,
                     'optimize': True,
-                    'progressive': True  # Progressive JPEG for better loading
+                    'progressive': True,  # Progressive JPEG for better loading
+                    'subsampling': 0,     # 4:4:4 chroma subsampling for better quality
+                    'dpi': (300, 300)     # High DPI for print quality
                 }
                 
                 image.save(output, **save_kwargs)
