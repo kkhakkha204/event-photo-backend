@@ -161,8 +161,9 @@ class ImageProcessor:
             # Optimize for face detection
             image = self.optimize_for_face_detection(image)
             
-            # Try different quality levels
+            # Try different quality levels - BUT STOP if compression becomes too aggressive
             best_result = None
+            min_acceptable_size = original_size * 0.3  # Never compress more than 70%
             
             for quality in self.quality_levels:
                 output = io.BytesIO()
@@ -190,21 +191,53 @@ class ImageProcessor:
                     'new_dimensions': (new_width, new_height)
                 }
                 
-                # If we've reached target size, use this result
+                # SAFETY CHECK: Prevent over-compression
+                if compressed_size < min_acceptable_size:
+                    logger.warning(f"Compression too aggressive ({compressed_size} < {min_acceptable_size}), "
+                                 f"stopping at previous quality level")
+                    break
+                
+                # If we've reached target size with acceptable compression, use this result
                 if compressed_size <= target_size:
                     logger.info(f"Compressed image: {original_size} -> {compressed_size} bytes "
                               f"(quality: {quality}, ratio: {compression_info['compression_ratio']:.2f})")
                     return output.getvalue(), compression_info
                 
-                # Keep track of best result in case we can't reach target
-                if best_result is None or compressed_size < best_result[1]['compressed_size']:
-                    best_result = (output.getvalue(), compression_info)
+                # Keep track of best result
+                best_result = (output.getvalue(), compression_info)
             
-            # If we couldn't reach target size, return best result
+            # If we couldn't reach target size without over-compressing, return best result
             if best_result:
-                logger.warning(f"Could not reach target size {target_size}, "
-                             f"best result: {best_result[1]['compressed_size']} bytes")
+                logger.warning(f"Could not reach target size {target_size} without over-compression, "
+                             f"best result: {best_result[1]['compressed_size']} bytes "
+                             f"(ratio: {best_result[1]['compression_ratio']:.2f})")
                 return best_result
+            
+            # If no acceptable compression found, try minimal resize with high quality
+            if not dimensions_changed and max(original_dimensions) > 3000:
+                logger.info("Trying minimal resize to avoid over-compression...")
+                # Try reducing dimensions slightly while maintaining very high quality
+                smaller_width = int(original_dimensions[0] * 0.9)
+                smaller_height = int(original_dimensions[1] * 0.9)
+                image = image.resize((smaller_width, smaller_height), Image.Resampling.LANCZOS)
+                
+                output = io.BytesIO()
+                image.save(output, format='JPEG', quality=95, optimize=True, 
+                          subsampling=0, progressive=True, dpi=(300, 300))
+                
+                compressed_size = output.tell()
+                compression_info = {
+                    'original_size': original_size,
+                    'compressed_size': compressed_size,
+                    'compression_ratio': compressed_size / original_size,
+                    'quality_used': '95 (with minimal resize)',
+                    'dimensions_changed': True,
+                    'original_dimensions': original_dimensions,
+                    'new_dimensions': (smaller_width, smaller_height)
+                }
+                
+                if compressed_size <= target_size:
+                    return output.getvalue(), compression_info
             
             # Fallback: return original if compression failed
             return image_bytes, {
