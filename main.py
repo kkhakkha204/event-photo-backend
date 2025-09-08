@@ -306,44 +306,56 @@ async def search_faces(
         
         query_norm = float(np.linalg.norm(query_embedding))
         
-        # Default thresholds cho từng mode
-        DEFAULT_THRESHOLDS = {
-            "strict": 0.4,      # Nghiêm ngặt hơn
-            "balanced": 0.5,    # Cân bằng
-            "loose": 0.7        # Lỏng lẻo hơn
-        }
-        
-        threshold = DEFAULT_THRESHOLDS[mode]
+        # Check Redis cache first
+        # if cache_service.is_available():
+        #     cached_result = cache_service.get_search_result(query_hash)
+        #     if cached_result:
+        #         # Add CDN optimized URLs
+        #         for result in cached_result[:limit]:
+        #             result['optimized_urls'] = cdn_service.get_responsive_urls(result['url'])
+        #             if include_thumbnails and result.get('bbox'):
+        #                 result['face_thumbnails'] = cdn_service.get_face_thumbnails(
+        #                     result['url'], [result['bbox']]
+        #                 )
+                
+        #         return {
+        #             "success": True,
+        #             "query_url": query_url,
+        #             "query_thumbnail": cdn_service.get_optimized_url(query_url, 'thumbnail'),
+        #             "results": cached_result[:limit],
+        #             "from_cache": True,
+        #             "mode": mode
+        #         }
         
         # Get embeddings based on mode
         min_quality = 0.2 if mode == "loose" else 0.3 if mode == "balanced" else 0.4
         
         # Query with optimizations
         query = db.query(
-            models.FaceEmbedding.id,
-            models.FaceEmbedding.image_id,
-            models.FaceEmbedding.embedding,
-            models.FaceEmbedding.bbox,
-            models.FaceEmbedding.quality_score,
-            models.Image.url,
-            models.Image.uploaded_at,
-            models.EmbeddingIndex.norm
-        ).join(
-            models.Image
-        ).join(
-            models.EmbeddingIndex, 
-            models.FaceEmbedding.id == models.EmbeddingIndex.face_embedding_id
-        ).filter(
-            and_(
-                models.FaceEmbedding.quality_score >= min_quality,
-                models.Image.processed == 2,
-                # Pre-filter by norm range (rough similarity)
-                models.EmbeddingIndex.norm.between(
-                    query_norm - 0.8, 
-                    query_norm + 0.8
-                )
-            )
+    models.FaceEmbedding.id,
+    models.FaceEmbedding.image_id,
+    models.FaceEmbedding.embedding,
+    models.FaceEmbedding.bbox,
+    models.FaceEmbedding.quality_score,
+    models.Image.url,
+    models.Image.uploaded_at,
+    models.EmbeddingIndex.norm
+).join(
+    models.Image
+).join(
+    models.EmbeddingIndex, 
+    models.FaceEmbedding.id == models.EmbeddingIndex.face_embedding_id
+).filter(
+    and_(
+        models.FaceEmbedding.quality_score >= min_quality,
+        models.Image.processed == 2,
+        # Pre-filter by norm range (rough similarity))
+        models.EmbeddingIndex.norm.between(
+            query_norm - 0.8, 
+            query_norm + 0.8
         )
+    )
+)
         
         # Limit scope for strict mode
         if mode == "strict":
@@ -353,7 +365,7 @@ async def search_faces(
         
         results = query.all()
         
-        # Prepare embeddings data
+        # Prepare embeddings dataa
         embeddings_data = [
             {
                 'id': r.id,
@@ -367,7 +379,26 @@ async def search_faces(
             for r in results
         ]
         
-        # Vectorized search với threshold mặc định
+        # Calculate thresholds
+        sample_distances = np.random.choice(
+            len(embeddings_data), 
+            min(200, len(embeddings_data)), 
+            replace=False
+        ).tolist() if embeddings_data else []
+        
+        if sample_distances:
+            sample_embeddings = [embeddings_data[i]['embedding'] for i in sample_distances]
+            distances = np.linalg.norm(
+                np.array(sample_embeddings) - query_embedding, 
+                axis=1
+            ).tolist()
+        else:
+            distances = []
+        
+        strict_threshold, loose_threshold = face_service.calculate_adaptive_threshold(distances)
+        threshold = strict_threshold if mode == "strict" else loose_threshold if mode == "loose" else strict_threshold * 1.2
+        
+        # Vectorized search
         matches = await vectorized_search(query_embedding, embeddings_data, threshold)
         
         # Group by image
@@ -439,9 +470,9 @@ async def search_faces(
             "results": final_results,
             "total_matches": len(final_results),
             "thresholds": {
-                "strict": DEFAULT_THRESHOLDS["strict"],
-                "balanced": DEFAULT_THRESHOLDS["balanced"], 
-                "loose": DEFAULT_THRESHOLDS["loose"],
+                "strict": strict_threshold,
+                "balanced": (strict_threshold + loose_threshold) / 2,
+                "loose": loose_threshold,
                 "used": threshold
             },
             "mode": mode,
