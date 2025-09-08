@@ -396,7 +396,7 @@ async def search_faces(
             distances = []
         
         strict_threshold, loose_threshold = face_service.calculate_adaptive_threshold(distances)
-        threshold = strict_threshold if mode == "strict" else loose_threshold if mode == "loose" else strict_threshold * 1.2
+        threshold = strict_threshold if mode == "strict" else loose_threshold if mode == "loose" else strict_threshold * 1.15
         
         # Vectorized search
         matches = await vectorized_search(query_embedding, embeddings_data, threshold)
