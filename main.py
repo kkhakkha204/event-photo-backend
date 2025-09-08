@@ -308,9 +308,9 @@ async def search_faces(
         
         # Default thresholds cho từng mode
         DEFAULT_THRESHOLDS = {
-            "strict": 0.4,      # Nghiêm ngặt hơn
-            "balanced": 0.6,    # Cân bằng
-            "loose": 0.8        # Lỏng lẻo hơn
+            "strict": 0.2,      # Nghiêm ngặt hơn
+            "balanced": 0.4,    # Cân bằng
+            "loose": 0.6        # Lỏng lẻo hơn
         }
         
         threshold = DEFAULT_THRESHOLDS[mode]
