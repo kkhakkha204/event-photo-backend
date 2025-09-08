@@ -328,7 +328,7 @@ async def search_faces(
         #         }
         
         # Get embeddings based on mode
-        min_quality = 0.3 if mode == "loose" else 0.4 if mode == "balanced" else 0.5
+        min_quality = 0.2 if mode == "loose" else 0.3 if mode == "balanced" else 0.4
         
         # Query with optimizations
         query = db.query(
@@ -351,8 +351,8 @@ async def search_faces(
         models.Image.processed == 2,
         # Pre-filter by norm range (rough similarity))
         models.EmbeddingIndex.norm.between(
-            query_norm - 1.2, 
-            query_norm + 1.2
+            query_norm - 0.8, 
+            query_norm + 0.8
         )
     )
 )
@@ -396,7 +396,7 @@ async def search_faces(
             distances = []
         
         strict_threshold, loose_threshold = face_service.calculate_adaptive_threshold(distances)
-        threshold = strict_threshold if mode == "strict" else loose_threshold if mode == "loose" else strict_threshold * 1.1
+        threshold = strict_threshold if mode == "strict" else loose_threshold if mode == "loose" else strict_threshold * 1.2
         
         # Vectorized search
         matches = await vectorized_search(query_embedding, embeddings_data, threshold)
