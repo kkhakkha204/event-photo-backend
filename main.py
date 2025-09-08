@@ -328,7 +328,7 @@ async def search_faces(
         #         }
         
         # Get embeddings based on mode
-        min_quality = 0.2 if mode == "loose" else 0.3 if mode == "balanced" else 0.4
+        min_quality = 0.25 if mode == "loose" else 0.35 if mode == "balanced" else 0.45
         
         # Query with optimizations
         query = db.query(
