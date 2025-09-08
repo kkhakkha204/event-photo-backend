@@ -328,7 +328,7 @@ async def search_faces(
         #         }
         
         # Get embeddings based on mode
-        min_quality = 0.25 if mode == "loose" else 0.35 if mode == "balanced" else 0.45
+        min_quality = 0.3 if mode == "loose" else 0.4 if mode == "balanced" else 0.5
         
         # Query with optimizations
         query = db.query(
@@ -351,8 +351,8 @@ async def search_faces(
         models.Image.processed == 2,
         # Pre-filter by norm range (rough similarity))
         models.EmbeddingIndex.norm.between(
-            query_norm - 0.8, 
-            query_norm + 0.8
+            query_norm - 1.2, 
+            query_norm + 1.2
         )
     )
 )
