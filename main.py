@@ -291,7 +291,7 @@ async def search_faces(
         contents = await file.read()
         query_url = upload_image(contents)
         
-        # Extract face
+        # Extract face with additional metadata
         query_faces = face_service.extract_faces(query_url, return_all=False)
         
         if not query_faces:
@@ -301,71 +301,68 @@ async def search_faces(
                 "query_url": query_url
             }
         
-        query_embedding = np.array(query_faces[0]['embedding'])
-        query_hash = calculate_query_hash(query_embedding.tolist(), mode)
+        query_face = query_faces[0]
+        query_embedding = np.array(query_face['embedding'])
+        
+        # Calculate adaptive thresholds based on query face characteristics
+        adaptive_thresholds = get_adaptive_threshold(query_faces, mode)
+        distance_threshold = adaptive_thresholds['distance_threshold']
+        min_quality = adaptive_thresholds['min_quality']
+        
+        # Generate cache key including face characteristics
+        query_hash = calculate_enhanced_query_hash(
+            query_embedding.tolist(), 
+            mode, 
+            query_face.get('area', {}),
+            query_face.get('quality_score', 0)
+        )
         
         query_norm = float(np.linalg.norm(query_embedding))
         
-        # Check Redis cache first
+        # Check Redis cache first (commented out in original, keeping structure)
         # if cache_service.is_available():
         #     cached_result = cache_service.get_search_result(query_hash)
         #     if cached_result:
-        #         # Add CDN optimized URLs
-        #         for result in cached_result[:limit]:
-        #             result['optimized_urls'] = cdn_service.get_responsive_urls(result['url'])
-        #             if include_thumbnails and result.get('bbox'):
-        #                 result['face_thumbnails'] = cdn_service.get_face_thumbnails(
-        #                     result['url'], [result['bbox']]
-        #                 )
-                
-        #         return {
-        #             "success": True,
-        #             "query_url": query_url,
-        #             "query_thumbnail": cdn_service.get_optimized_url(query_url, 'thumbnail'),
-        #             "results": cached_result[:limit],
-        #             "from_cache": True,
-        #             "mode": mode
-        #         }
+        #         # Process cached results...
+        #         return cached_response
         
-        # Get embeddings based on mode
-        min_quality = 0.2 if mode == "loose" else 0.35 if mode == "balanced" else 0.45
-        
-        # Query with optimizations
+        # Enhanced database query with adaptive quality filtering
         query = db.query(
-    models.FaceEmbedding.id,
-    models.FaceEmbedding.image_id,
-    models.FaceEmbedding.embedding,
-    models.FaceEmbedding.bbox,
-    models.FaceEmbedding.quality_score,
-    models.Image.url,
-    models.Image.uploaded_at,
-    models.EmbeddingIndex.norm
-).join(
-    models.Image
-).join(
-    models.EmbeddingIndex, 
-    models.FaceEmbedding.id == models.EmbeddingIndex.face_embedding_id
-).filter(
-    and_(
-        models.FaceEmbedding.quality_score >= min_quality,
-        models.Image.processed == 2,
-        # Pre-filter by norm range (rough similarity))
-        models.EmbeddingIndex.norm.between(
-            query_norm - 0.8, 
-            query_norm + 0.8
+            models.FaceEmbedding.id,
+            models.FaceEmbedding.image_id,
+            models.FaceEmbedding.embedding,
+            models.FaceEmbedding.bbox,
+            models.FaceEmbedding.quality_score,
+            models.Image.url,
+            models.Image.uploaded_at,
+            models.EmbeddingIndex.norm
+        ).join(
+            models.Image
+        ).join(
+            models.EmbeddingIndex, 
+            models.FaceEmbedding.id == models.EmbeddingIndex.face_embedding_id
+        ).filter(
+            and_(
+                models.FaceEmbedding.quality_score >= min_quality,
+                models.Image.processed == 2,
+                # Enhanced norm-based pre-filtering
+                models.EmbeddingIndex.norm.between(
+                    query_norm - adaptive_thresholds['norm_range'], 
+                    query_norm + adaptive_thresholds['norm_range']
+                )
+            )
         )
-    )
-)
         
-        # Limit scope for strict mode
+        # Adaptive result set size based on query face quality
+        max_candidates = adaptive_thresholds['max_candidates']
         if mode == "strict":
-            query = query.order_by(desc(models.Image.uploaded_at)).limit(4000)
+            query = query.order_by(desc(models.Image.uploaded_at)).limit(max_candidates)
         else:
-            query = query.limit(6000)
+            query = query.limit(max_candidates + 2000)
         
         results = query.all()
         
-        # Prepare embeddings dataa
+        # Prepare embeddings data
         embeddings_data = [
             {
                 'id': r.id,
@@ -379,29 +376,15 @@ async def search_faces(
             for r in results
         ]
         
-        # Calculate thresholds
-        sample_distances = np.random.choice(
-            len(embeddings_data), 
-            min(200, len(embeddings_data)), 
-            replace=False
-        ).tolist() if embeddings_data else []
+        # Enhanced vectorized search with adaptive threshold
+        matches = await vectorized_search_adaptive(
+            query_embedding, 
+            embeddings_data, 
+            distance_threshold,
+            query_face
+        )
         
-        if sample_distances:
-            sample_embeddings = [embeddings_data[i]['embedding'] for i in sample_distances]
-            distances = np.linalg.norm(
-                np.array(sample_embeddings) - query_embedding, 
-                axis=1
-            ).tolist()
-        else:
-            distances = []
-        
-        strict_threshold, loose_threshold = face_service.calculate_adaptive_threshold(distances)
-        threshold = strict_threshold if mode == "strict" else loose_threshold if mode == "loose" else strict_threshold * 1.2
-        
-        # Vectorized search
-        matches = await vectorized_search(query_embedding, embeddings_data, threshold)
-        
-        # Group by image
+        # Group by image with enhanced scoring
         image_scores = {}
         for match in matches:
             img_id = match['image_id']
@@ -410,28 +393,41 @@ async def search_faces(
                     'url': match['url'],
                     'distances': [],
                     'bboxes': [],
+                    'qualities': [],
                     'best_quality': 0,
                     'uploaded_at': match['uploaded_at']
                 }
+            
             image_scores[img_id]['distances'].append(match['distance'])
             image_scores[img_id]['bboxes'].append(match['bbox'])
+            image_scores[img_id]['qualities'].append(match['quality'])
             image_scores[img_id]['best_quality'] = max(
                 image_scores[img_id]['best_quality'], 
                 match['quality']
             )
         
-        # Build final results
+        # Build final results with enhanced scoring
         final_results = []
         for img_id, data in image_scores.items():
             min_distance = min(data['distances'])
             avg_distance = np.mean(data['distances'])
+            quality_boost = calculate_quality_boost(data['qualities'], query_face.get('quality_score', 0.5))
             
-            # Composite score
+            # Enhanced composite score with adaptive weights
+            weights = adaptive_thresholds['scoring_weights']
             composite_score = (
-                min_distance * 0.4 + 
-                avg_distance * 0.3 + 
-                (1 / (len(data['distances']) + 1)) * 0.2 +
-                (1 - data['best_quality']) * 0.1
+                min_distance * weights['min_distance'] + 
+                avg_distance * weights['avg_distance'] + 
+                (1 / (len(data['distances']) + 1)) * weights['face_count'] +
+                (1 - data['best_quality']) * weights['quality'] -
+                quality_boost * weights['quality_boost']  # Subtract to favor better quality matches
+            )
+            
+            # Enhanced confidence calculation
+            confidence = calculate_adaptive_confidence(
+                min_distance, 
+                adaptive_thresholds['confidence_params'],
+                query_face.get('quality_score', 0.5)
             )
             
             result = {
@@ -442,7 +438,8 @@ async def search_faces(
                 'avg_distance': float(avg_distance),
                 'face_count': len(data['distances']),
                 'composite_score': float(composite_score),
-                'confidence': max(0, 1 - min_distance),
+                'confidence': float(confidence),
+                'quality_boost': float(quality_boost),
                 'uploaded_at': data['uploaded_at'].isoformat()
             }
             
@@ -467,13 +464,18 @@ async def search_faces(
             "success": True,
             "query_url": query_url,
             "query_thumbnail": cdn_service.get_optimized_url(query_url, 'thumbnail'),
+            "query_face_info": {
+                "area": query_face.get('area', {}),
+                "quality_score": query_face.get('quality_score', 0),
+                "adaptive_mode": adaptive_thresholds['mode_info']
+            },
             "results": final_results,
             "total_matches": len(final_results),
-            "thresholds": {
-                "strict": strict_threshold,
-                "balanced": (strict_threshold + loose_threshold) / 2,
-                "loose": loose_threshold,
-                "used": threshold
+            "adaptive_thresholds": {
+                "distance_threshold": distance_threshold,
+                "min_quality": min_quality,
+                "mode": mode,
+                "query_face_category": adaptive_thresholds['face_category']
             },
             "mode": mode,
             "from_cache": False
@@ -481,6 +483,208 @@ async def search_faces(
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# Helper functions for adaptive threshold system
+
+def get_adaptive_threshold(query_faces, mode):
+    """
+    Calculate adaptive thresholds based on query face characteristics
+    """
+    face = query_faces[0]
+    face_area = face.get('area', {})
+    
+    # Calculate face area (width * height)
+    if isinstance(face_area, dict) and 'w' in face_area and 'h' in face_area:
+        area_pixels = face_area['w'] * face_area['h']
+    else:
+        # Fallback if area not available
+        area_pixels = 15000  # Assume medium size
+    
+    # Get face quality score
+    face_quality = face.get('quality_score', 0.5)
+    
+    # Categorize face size
+    if area_pixels < 8000:  # Very small face
+        face_category = "very_small"
+        base_thresholds = {
+            'strict': {'distance': 0.50, 'quality': 0.15},
+            'balanced': {'distance': 0.60, 'quality': 0.20}, 
+            'loose': {'distance': 0.70, 'quality': 0.25}
+        }
+        norm_range = 1.0
+        max_candidates = 8000
+    elif area_pixels < 15000:  # Small face
+        face_category = "small"
+        base_thresholds = {
+            'strict': {'distance': 0.45, 'quality': 0.20},
+            'balanced': {'distance': 0.55, 'quality': 0.25}, 
+            'loose': {'distance': 0.65, 'quality': 0.30}
+        }
+        norm_range = 0.9
+        max_candidates = 6000
+    elif area_pixels < 30000:  # Medium face
+        face_category = "medium"
+        base_thresholds = {
+            'strict': {'distance': 0.35, 'quality': 0.25},
+            'balanced': {'distance': 0.45, 'quality': 0.30}, 
+            'loose': {'distance': 0.55, 'quality': 0.35}
+        }
+        norm_range = 0.8
+        max_candidates = 4000
+    else:  # Large face
+        face_category = "large"
+        base_thresholds = {
+            'strict': {'distance': 0.30, 'quality': 0.30},
+            'balanced': {'distance': 0.40, 'quality': 0.35}, 
+            'loose': {'distance': 0.50, 'quality': 0.40}
+        }
+        norm_range = 0.7
+        max_candidates = 4000
+    
+    # Adjust thresholds based on query face quality
+    quality_factor = 1.0
+    if face_quality < 0.3:  # Low quality query
+        quality_factor = 1.15  # Relax thresholds
+    elif face_quality > 0.7:  # High quality query
+        quality_factor = 0.9   # Tighten thresholds
+    
+    selected_thresholds = base_thresholds[mode]
+    
+    return {
+        'distance_threshold': selected_thresholds['distance'] * quality_factor,
+        'min_quality': selected_thresholds['quality'],
+        'norm_range': norm_range,
+        'max_candidates': max_candidates,
+        'face_category': face_category,
+        'scoring_weights': get_scoring_weights(face_category, mode),
+        'confidence_params': get_confidence_params(face_category),
+        'mode_info': {
+            'area_pixels': area_pixels,
+            'quality_factor': quality_factor,
+            'base_mode': mode
+        }
+    }
+
+
+def get_scoring_weights(face_category, mode):
+    """
+    Get adaptive scoring weights based on face category and mode
+    """
+    base_weights = {
+        'min_distance': 0.4,
+        'avg_distance': 0.3,
+        'face_count': 0.2,
+        'quality': 0.1,
+        'quality_boost': 0.05
+    }
+    
+    # Adjust weights for small faces (prioritize quality more)
+    if face_category in ['very_small', 'small']:
+        base_weights['quality'] += 0.05
+        base_weights['quality_boost'] += 0.03
+        base_weights['min_distance'] -= 0.05
+        base_weights['avg_distance'] -= 0.03
+    
+    # Adjust for strict mode (prioritize distance more)
+    if mode == 'strict':
+        base_weights['min_distance'] += 0.1
+        base_weights['face_count'] -= 0.05
+        base_weights['quality'] -= 0.05
+    
+    return base_weights
+
+
+def get_confidence_params(face_category):
+    """
+    Get confidence calculation parameters based on face category
+    """
+    if face_category == 'very_small':
+        return {'base_confidence': 0.6, 'distance_penalty': 1.5}
+    elif face_category == 'small':
+        return {'base_confidence': 0.7, 'distance_penalty': 1.3}
+    elif face_category == 'medium':
+        return {'base_confidence': 0.8, 'distance_penalty': 1.0}
+    else:  # large
+        return {'base_confidence': 0.85, 'distance_penalty': 0.9}
+
+
+def calculate_enhanced_query_hash(embedding, mode, face_area, quality_score):
+    """
+    Enhanced hash calculation including face characteristics
+    """
+    area_key = f"{face_area.get('w', 0)}x{face_area.get('h', 0)}" if isinstance(face_area, dict) else "unknown"
+    quality_key = f"q{int(quality_score * 100)}" if quality_score else "q50"
+    
+    embedding_hash = hashlib.md5(str(embedding).encode()).hexdigest()[:16]
+    return f"{embedding_hash}_{mode}_{area_key}_{quality_key}"
+
+
+async def vectorized_search_adaptive(query_embedding, embeddings_data, threshold, query_face):
+    """
+    Enhanced vectorized search with adaptive filtering
+    """
+    if not embeddings_data:
+        return []
+    
+    # Convert to numpy arrays
+    embeddings = np.array([item['embedding'] for item in embeddings_data])
+    
+    # Calculate distances
+    distances = np.linalg.norm(embeddings - query_embedding, axis=1)
+    
+    # Find matches within threshold
+    valid_indices = np.where(distances <= threshold)[0]
+    
+    matches = []
+    for idx in valid_indices:
+        item = embeddings_data[idx]
+        matches.append({
+            'image_id': item['image_id'],
+            'url': item['url'],
+            'distance': float(distances[idx]),
+            'bbox': item['bbox'],
+            'quality': item['quality'],
+            'uploaded_at': item['uploaded_at']
+        })
+    
+    return matches
+
+
+def calculate_quality_boost(match_qualities, query_quality):
+    """
+    Calculate quality boost factor for scoring
+    """
+    if not match_qualities:
+        return 0.0
+    
+    avg_match_quality = np.mean(match_qualities)
+    max_match_quality = max(match_qualities)
+    
+    # Boost score if matches have significantly better quality than query
+    if max_match_quality > query_quality + 0.1:
+        return min(0.1, (max_match_quality - query_quality) * 0.5)
+    
+    return 0.0
+
+
+def calculate_adaptive_confidence(distance, confidence_params, query_quality):
+    """
+    Calculate adaptive confidence score
+    """
+    base_confidence = confidence_params['base_confidence']
+    distance_penalty = confidence_params['distance_penalty']
+    
+    # Base confidence calculation
+    confidence = max(0, base_confidence - (distance * distance_penalty))
+    
+    # Adjust based on query quality
+    if query_quality > 0.6:
+        confidence = min(0.95, confidence * 1.1)  # Boost for high-quality queries
+    elif query_quality < 0.3:
+        confidence = confidence * 0.9  # Penalize for low-quality queries
+    
+    return max(0.1, min(0.95, confidence))
 
 @app.get("/api/images")
 async def get_all_images(
